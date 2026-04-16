@@ -1,0 +1,50 @@
+# OS and editor artifacts
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Conda and env artifacts
+.env
+.env.*
+conda-meta/
+
+# Snakemake runtime and logs
+.snakemake/
+logs/
+
+# Workflow outputs and intermediates
+results/
+work/
+temp/
+metadata/
+
+# Reference indexes (large/reproducible)
+resources/ref/star_index/
+resources/ref/salmon_index/
+resources/ref/bismark_genome/
+
+# Optional data drops
+*.sra
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.bam
+*.bai
+*.cram
+*.crai
+
+# Local notebooks/checkpoints
+.ipynb_checkpoints/

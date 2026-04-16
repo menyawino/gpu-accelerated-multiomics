@@ -1,0 +1,381 @@
+import os
+from pathlib import Path
+
+import pandas as pd
+
+GSE = config["project"]["gse_accession"]
+OUTDIR = config["resources"]["outdir"]
+WORKDIR = config["resources"]["workdir"]
+METADATA_DIR = config["resources"]["metadata_dir"]
+TEMP_DIR = config["resources"]["temp_dir"]
+
+GENOME = config["reference"]["genome_fasta"]
+GTF = config["reference"]["gtf"]
+TRANSCRIPTS_FASTA = config["reference"]["transcripts_fasta"]
+
+PARABRICKS_RUNNER = config["parabricks"]["runner"]
+ENABLE_GPU_SURROGATE = bool(config["parabricks"]["enable_gpu_surrogate_alignment"])
+
+shell.prefix("set -euo pipefail; ")
+
+
+def _read_run_list(path):
+    p = Path(path)
+    if not p.exists():
+        return []
+    return [x.strip() for x in p.read_text().splitlines() if x.strip()]
+
+
+checkpoint discover_runs:
+    output:
+        rnaseq_runs_tsv=f"{METADATA_DIR}/rnaseq_runs.tsv",
+        wgbs_runs_tsv=f"{METADATA_DIR}/wgbs_runs.tsv",
+        matched_pairs_tsv=f"{METADATA_DIR}/matched_pairs.tsv",
+        rnaseq_runs_list=f"{METADATA_DIR}/rnaseq_runs.txt",
+        wgbs_runs_list=f"{METADATA_DIR}/wgbs_runs.txt",
+    conda:
+        "../envs/workflow.yaml"
+    shell:
+        (
+            "mkdir -p {METADATA_DIR} && "
+            "python scripts/discover_gse123976_runs.py "
+            "--gse {GSE} "
+            "--metadata-dir {METADATA_DIR} "
+            "--manual-pairs {config[pairing][manual_pairs_tsv]}"
+        )
+
+
+def get_rnaseq_runs(wildcards):
+    ckpt = checkpoints.discover_runs.get(**wildcards)
+    return _read_run_list(ckpt.output.rnaseq_runs_list)
+
+
+
+def get_wgbs_runs(wildcards):
+    ckpt = checkpoints.discover_runs.get(**wildcards)
+    return _read_run_list(ckpt.output.wgbs_runs_list)
+
+
+
+def get_all_runs(wildcards):
+    return sorted(set(get_rnaseq_runs(wildcards) + get_wgbs_runs(wildcards)))
+
+
+
+def rnaseq_quant_files(wildcards):
+    return expand(f"{OUTDIR}/rnaseq/salmon/{{run}}/quant.sf", run=get_rnaseq_runs(wildcards))
+
+
+
+def wgbs_cov_files(wildcards):
+    return expand(f"{OUTDIR}/wgbs/methyl/{{run}}/{{run}}.bismark.cov.gz", run=get_wgbs_runs(wildcards))
+
+
+
+def gpu_surrogate_files(wildcards):
+    if not ENABLE_GPU_SURROGATE:
+        return []
+    return expand(f"{OUTDIR}/gpu_surrogate/{{run}}.fq2bam.bam", run=get_all_runs(wildcards))
+
+
+rule all:
+    input:
+        f"{OUTDIR}/matrices/gene_expression_tpm.tsv",
+        f"{OUTDIR}/matrices/isoform_expression_tpm.tsv",
+        f"{OUTDIR}/matrices/gene_methylation_beta.tsv",
+        f"{OUTDIR}/matrices/isoform_methylation_beta.tsv",
+        f"{OUTDIR}/network/gene_network_edges.tsv",
+        f"{OUTDIR}/network/isoform_network_edges.tsv",
+        f"{OUTDIR}/network/gene_network.graphml",
+        f"{OUTDIR}/network/isoform_network.graphml",
+        rnaseq_quant_files,
+        wgbs_cov_files,
+        gpu_surrogate_files,
+
+
+rule download_sra_fastq:
+    output:
+        r1=f"{OUTDIR}/fastq/raw/{{run}}_1.fastq.gz",
+        r2=f"{OUTDIR}/fastq/raw/{{run}}_2.fastq.gz",
+    params:
+        temp_sra=f"{TEMP_DIR}/sra/{{run}}",
+        temp_fq=f"{TEMP_DIR}/fastq/{{run}}",
+        threads=config["compute"]["download_threads"],
+    conda:
+        "../envs/workflow.yaml"
+    shell:
+        (
+            "mkdir -p {params.temp_sra} {params.temp_fq} $(dirname {output.r1}) && "
+            "prefetch {wildcards.run} -O {params.temp_sra} && "
+            "fasterq-dump --split-files --threads {params.threads} --outdir {params.temp_fq} "
+            "{params.temp_sra}/{wildcards.run}.sra && "
+            "pigz -p {params.threads} -f {params.temp_fq}/{wildcards.run}_1.fastq && "
+            "pigz -p {params.threads} -f {params.temp_fq}/{wildcards.run}_2.fastq && "
+            "mv {params.temp_fq}/{wildcards.run}_1.fastq.gz {output.r1} && "
+            "mv {params.temp_fq}/{wildcards.run}_2.fastq.gz {output.r2}"
+        )
+
+
+rule trim_fastq:
+    input:
+        r1=f"{OUTDIR}/fastq/raw/{{run}}_1.fastq.gz",
+        r2=f"{OUTDIR}/fastq/raw/{{run}}_2.fastq.gz",
+    output:
+        r1=f"{OUTDIR}/fastq/trimmed/{{run}}_1.trim.fastq.gz",
+        r2=f"{OUTDIR}/fastq/trimmed/{{run}}_2.trim.fastq.gz",
+        html=f"{OUTDIR}/qc/fastp/{{run}}.html",
+        json=f"{OUTDIR}/qc/fastp/{{run}}.json",
+    threads: config["compute"]["fastp_threads"]
+    conda:
+        "../envs/workflow.yaml"
+    shell:
+        (
+            "mkdir -p $(dirname {output.r1}) $(dirname {output.html}) && "
+            "fastp -i {input.r1} -I {input.r2} "
+            "-o {output.r1} -O {output.r2} "
+            "--thread {threads} "
+            "--trim_front1 {config[wgbs][trim_front1]} "
+            "--trim_front2 {config[wgbs][trim_front2]} "
+            "--length_required {config[wgbs][min_read_len]} "
+            "--html {output.html} --json {output.json}"
+        )
+
+
+rule star_index:
+    input:
+        fasta=GENOME,
+        gtf=GTF,
+    output:
+        sa="resources/ref/star_index/SA",
+    threads: config["compute"]["star_threads"]
+    conda:
+        "../envs/workflow.yaml"
+    shell:
+        (
+            "mkdir -p resources/ref/star_index && "
+            "STAR --runThreadN {threads} --runMode genomeGenerate "
+            "--genomeDir resources/ref/star_index "
+            "--genomeFastaFiles {input.fasta} "
+            "--sjdbGTFfile {input.gtf} "
+            "--sjdbOverhang {config[rnaseq][star_overhang]}"
+        )
+
+
+rule salmon_index:
+    input:
+        transcripts=TRANSCRIPTS_FASTA,
+    output:
+        version_info="resources/ref/salmon_index/versionInfo.json",
+    threads: config["compute"]["salmon_threads"]
+    conda:
+        "../envs/workflow.yaml"
+    shell:
+        (
+            "mkdir -p resources/ref/salmon_index && "
+            "salmon index -t {input.transcripts} -i resources/ref/salmon_index -p {threads}"
+        )
+
+
+rule bismark_genome_prep:
+    input:
+        fasta=GENOME,
+    output:
+        ct_fasta="resources/ref/bismark_genome/Bisulfite_Genome/CT_conversion/genome_mfa.CT_conversion.fa",
+    conda:
+        "../envs/workflow.yaml"
+    shell:
+        (
+            "mkdir -p {config[wgbs][bismark_genome_folder]} && "
+            "ln -sf $(realpath {input.fasta}) {config[wgbs][bismark_genome_folder]}/$(basename {input.fasta}) && "
+            "bismark_genome_preparation --verbose {config[wgbs][bismark_genome_folder]}"
+        )
+
+
+rule rnaseq_star_align:
+    input:
+        idx="resources/ref/star_index/SA",
+        r1=f"{OUTDIR}/fastq/trimmed/{{run}}_1.trim.fastq.gz",
+        r2=f"{OUTDIR}/fastq/trimmed/{{run}}_2.trim.fastq.gz",
+    output:
+        bam=f"{OUTDIR}/rnaseq/star/{{run}}/{{run}}.Aligned.sortedByCoord.out.bam",
+    threads: config["compute"]["star_threads"]
+    conda:
+        "../envs/workflow.yaml"
+    shell:
+        (
+            "mkdir -p $(dirname {output.bam}) && "
+            "STAR --runThreadN {threads} "
+            "--genomeDir resources/ref/star_index "
+            "--readFilesIn {input.r1} {input.r2} "
+            "--readFilesCommand zcat "
+            "--outFileNamePrefix {OUTDIR}/rnaseq/star/{wildcards.run}/{wildcards.run}. "
+            "--outSAMtype BAM SortedByCoordinate"
+        )
+
+
+rule rnaseq_salmon_isoform_quant:
+    input:
+        index="resources/ref/salmon_index/versionInfo.json",
+        bam=f"{OUTDIR}/rnaseq/star/{{run}}/{{run}}.Aligned.sortedByCoord.out.bam",
+    output:
+        quant=f"{OUTDIR}/rnaseq/salmon/{{run}}/quant.sf",
+    threads: config["compute"]["salmon_threads"]
+    conda:
+        "../envs/workflow.yaml"
+    shell:
+        (
+            "mkdir -p {OUTDIR}/rnaseq/salmon/{wildcards.run} && "
+            "salmon quant -t {TRANSCRIPTS_FASTA} "
+            "-l {config[rnaseq][salmon_libtype]} "
+            "-a {input.bam} -p {threads} "
+            "--gcBias --seqBias "
+            "-o {OUTDIR}/rnaseq/salmon/{wildcards.run}"
+        )
+
+
+rule wgbs_bismark_align:
+    input:
+        prep="resources/ref/bismark_genome/Bisulfite_Genome/CT_conversion/genome_mfa.CT_conversion.fa",
+        r1=f"{OUTDIR}/fastq/trimmed/{{run}}_1.trim.fastq.gz",
+        r2=f"{OUTDIR}/fastq/trimmed/{{run}}_2.trim.fastq.gz",
+    output:
+        bam=f"{OUTDIR}/wgbs/aln/{{run}}/{{run}}.bam",
+    threads: config["compute"]["bismark_threads"]
+    conda:
+        "../envs/workflow.yaml"
+    shell:
+        (
+            "mkdir -p {OUTDIR}/wgbs/aln/{wildcards.run} && "
+            "bismark --genome {config[wgbs][bismark_genome_folder]} "
+            "--multicore {config[wgbs][bismark_multicore]} "
+            "-1 {input.r1} -2 {input.r2} "
+            "--basename {wildcards.run} "
+            "-o {OUTDIR}/wgbs/aln/{wildcards.run} && "
+            "mv {OUTDIR}/wgbs/aln/{wildcards.run}/{wildcards.run}_bismark_bt2_pe.bam {output.bam} && "
+            "samtools index {output.bam}"
+        )
+
+
+rule wgbs_methylation_extract:
+    input:
+        bam=f"{OUTDIR}/wgbs/aln/{{run}}/{{run}}.bam",
+    output:
+        cov=f"{OUTDIR}/wgbs/methyl/{{run}}/{{run}}.bismark.cov.gz",
+    threads: config["compute"]["bismark_threads"]
+    conda:
+        "../envs/workflow.yaml"
+    shell:
+        (
+            "mkdir -p {OUTDIR}/wgbs/methyl/{wildcards.run} && "
+            "bismark_methylation_extractor --gzip --bedGraph --comprehensive --merge_non_CpG "
+            "--multicore {threads} --buffer_size 10G "
+            "-o {OUTDIR}/wgbs/methyl/{wildcards.run} {input.bam} && "
+            "mv {OUTDIR}/wgbs/methyl/{wildcards.run}/{wildcards.run}.bismark.cov.gz {output.cov}"
+        )
+
+
+rule parabricks_fq2bam_surrogate:
+    input:
+        r1=f"{OUTDIR}/fastq/trimmed/{{run}}_1.trim.fastq.gz",
+        r2=f"{OUTDIR}/fastq/trimmed/{{run}}_2.trim.fastq.gz",
+        ref=GENOME,
+    output:
+        bam=f"{OUTDIR}/gpu_surrogate/{{run}}.fq2bam.bam",
+    params:
+        gpu=config["parabricks"]["gpu_count"],
+        extra=config["parabricks"]["fq2bam_extra"],
+    conda:
+        "../envs/workflow.yaml"
+    shell:
+        (
+            "mkdir -p $(dirname {output.bam}) {WORKDIR}/pbrun/{wildcards.run} && "
+            "{PARABRICKS_RUNNER} fq2bam "
+            "--ref {input.ref} "
+            "--in-fq {input.r1} {input.r2} '@RG\\tID:{wildcards.run}\\tSM:{wildcards.run}\\tPL:ILLUMINA\\tLB:lib1\\tPU:unit1' "
+            "--out-bam {output.bam} "
+            "--num-gpus {params.gpu} "
+            "--tmp-dir {WORKDIR}/pbrun/{wildcards.run} "
+            "{params.extra}"
+        )
+
+
+rule build_expression_matrices:
+    input:
+        quants=rnaseq_quant_files,
+        rnaseq_runs_tsv=lambda wc: checkpoints.discover_runs.get(**wc).output.rnaseq_runs_tsv,
+        matched_pairs_tsv=lambda wc: checkpoints.discover_runs.get(**wc).output.matched_pairs_tsv,
+        gtf=GTF,
+    output:
+        gene_tpm=f"{OUTDIR}/matrices/gene_expression_tpm.tsv",
+        iso_tpm=f"{OUTDIR}/matrices/isoform_expression_tpm.tsv",
+    conda:
+        "../envs/workflow.yaml"
+    shell:
+        (
+            "mkdir -p {OUTDIR}/matrices && "
+            "python scripts/build_expression_matrices.py "
+            "--rnaseq-runs {input.rnaseq_runs_tsv} "
+            "--matched-pairs {input.matched_pairs_tsv} "
+            "--gtf {input.gtf} "
+            "--salmon-dir {OUTDIR}/rnaseq/salmon "
+            "--out-gene {output.gene_tpm} "
+            "--out-isoform {output.iso_tpm}"
+        )
+
+
+rule build_methylation_matrices:
+    input:
+        covs=wgbs_cov_files,
+        wgbs_runs_tsv=lambda wc: checkpoints.discover_runs.get(**wc).output.wgbs_runs_tsv,
+        matched_pairs_tsv=lambda wc: checkpoints.discover_runs.get(**wc).output.matched_pairs_tsv,
+        gtf=GTF,
+    output:
+        gene_beta=f"{OUTDIR}/matrices/gene_methylation_beta.tsv",
+        iso_beta=f"{OUTDIR}/matrices/isoform_methylation_beta.tsv",
+    conda:
+        "../envs/workflow.yaml"
+    shell:
+        (
+            "mkdir -p {OUTDIR}/matrices && "
+            "python scripts/build_methylation_matrices.py "
+            "--wgbs-runs {input.wgbs_runs_tsv} "
+            "--matched-pairs {input.matched_pairs_tsv} "
+            "--gtf {input.gtf} "
+            "--methyl-dir {OUTDIR}/wgbs/methyl "
+            "--out-gene {output.gene_beta} "
+            "--out-isoform {output.iso_beta}"
+        )
+
+
+rule build_multiomic_network:
+    input:
+        gene_expr=f"{OUTDIR}/matrices/gene_expression_tpm.tsv",
+        iso_expr=f"{OUTDIR}/matrices/isoform_expression_tpm.tsv",
+        gene_meth=f"{OUTDIR}/matrices/gene_methylation_beta.tsv",
+        iso_meth=f"{OUTDIR}/matrices/isoform_methylation_beta.tsv",
+        pairs=lambda wc: checkpoints.discover_runs.get(**wc).output.matched_pairs_tsv,
+    output:
+        gene_edges=f"{OUTDIR}/network/gene_network_edges.tsv",
+        iso_edges=f"{OUTDIR}/network/isoform_network_edges.tsv",
+        gene_graph=f"{OUTDIR}/network/gene_network.graphml",
+        iso_graph=f"{OUTDIR}/network/isoform_network.graphml",
+    conda:
+        "../envs/workflow.yaml"
+    shell:
+        (
+            "mkdir -p {OUTDIR}/network && "
+            "python scripts/build_multiomic_network.py "
+            "--gene-expression {input.gene_expr} "
+            "--iso-expression {input.iso_expr} "
+            "--gene-methylation {input.gene_meth} "
+            "--iso-methylation {input.iso_meth} "
+            "--pairs {input.pairs} "
+            "--method {config[network][correlation_method]} "
+            "--min-abs-correlation {config[network][min_abs_correlation]} "
+            "--max-fdr {config[network][max_fdr]} "
+            "--min-pairs {config[network][min_pairs]} "
+            "--out-gene-edges {output.gene_edges} "
+            "--out-iso-edges {output.iso_edges} "
+            "--out-gene-graphml {output.gene_graph} "
+            "--out-iso-graphml {output.iso_graph}"
+        )

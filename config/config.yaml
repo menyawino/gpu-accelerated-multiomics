@@ -1,0 +1,50 @@
+project:
+  name: HF_Metab_GSE123976
+  gse_accession: GSE123976
+
+resources:
+  outdir: results
+  workdir: work
+  metadata_dir: metadata
+  temp_dir: temp
+
+reference:
+  genome_fasta: resources/ref/GRCh38.primary_assembly.genome.fa
+  gtf: resources/ref/gencode.v44.annotation.gtf
+  transcripts_fasta: resources/ref/gencode.v44.transcripts.fa
+
+parabricks:
+  enable_gpu_surrogate_alignment: true
+  runner: scripts/pbrun.sh
+  gpu_count: 1
+  fq2bam_extra: "--bwa-options=-K 100000000"
+
+wgbs:
+  bismark_genome_folder: resources/ref/bismark_genome
+  bismark_multicore: 8
+  trim_front1: 10
+  trim_front2: 10
+  min_read_len: 30
+
+rnaseq:
+  star_overhang: 149
+  salmon_libtype: A
+
+network:
+  correlation_method: spearman
+  min_abs_correlation: 0.35
+  max_fdr: 0.05
+  min_pairs: 6
+
+compute:
+  download_threads: 8
+  fastp_threads: 8
+  star_threads: 16
+  salmon_threads: 8
+  bismark_threads: 8
+  python_threads: 4
+
+pairing:
+  # Optional file to override automated pairing.
+  # Columns: subject_id, rnaseq_run, wgbs_run
+  manual_pairs_tsv: config/manual_pairs.tsv
