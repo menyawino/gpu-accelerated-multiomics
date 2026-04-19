@@ -59,6 +59,20 @@ Dry run:
 ./run_analysis.sh --dry-run --cores 8 --jobs 4
 ```
 
+Incremental processing of only currently complete FASTQ pairs, without downstream integrative outputs:
+
+```bash
+./run_analysis.sh --available-only --cores 8 --jobs 4
+```
+
+Keep watching the raw FASTQ directory and process newly completed pairs as they arrive:
+
+```bash
+./run_analysis.sh --available-only --watch-interval 120 --cores 8 --jobs 4
+```
+
+This mode always skips the matrix and network build rules. It trims any complete pairs immediately, adds Parabricks surrogate BAM targets when Docker and references are available, and only adds RNA-seq or WGBS per-sample outputs when the required references and run metadata are present.
+
 ## Pairing strategy
 
 Automated pairing is inferred from metadata subject-like tokens. For publication-grade analysis, provide explicit mapping in:

@@ -132,6 +132,12 @@ env_python_path() {
   printf "%s\n" "${conda_base}/envs/${1}/bin/python"
 }
 
+env_bin_path() {
+  local conda_base
+  conda_base="$(conda info --base)"
+  printf "%s\n" "${conda_base}/envs/${1}/bin/${2}"
+}
+
 remove_invalid_env_if_needed() {
   local env_name="$1"
   local python_path
@@ -185,13 +191,14 @@ install_workflow_dependencies() {
 
   ensure_mamba
   remove_invalid_env_if_needed "$CONDA_ENV_NAME"
+  remove_invalid_env_if_needed "hf_metab_snakemake"
 
   log "Creating/updating workflow env with mamba: ${CONDA_ENV_NAME}"
   conda config --set channel_priority strict
   run_conda_env_update
 
   log "Installing Snakemake launcher env with mamba (if needed)"
-  if ! command -v snakemake >/dev/null 2>&1; then
+  if [[ ! -x "$(env_bin_path hf_metab_snakemake snakemake)" ]]; then
     mamba create -y -n hf_metab_snakemake -c conda-forge -c bioconda snakemake=8.30.0 mamba
   fi
 }
