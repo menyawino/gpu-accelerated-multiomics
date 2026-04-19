@@ -5,7 +5,6 @@ channels:
   - defaults
 dependencies:
   - python=3.11
-  - pip
   - snakemake-minimal=8.30.0
   - mamba
   - pandas=2.2.2
@@ -19,13 +18,12 @@ dependencies:
   - bedtools=2.31.1
   - samtools=1.20
   - fastp=0.23.4
-  - sra-tools=3.0.10
+  - sra-tools=3.2.0
   - star=2.7.11b
-  - salmon=1.10.2
+  - salmon=1.10.3
   - bismark=0.24.2
   - bowtie2=2.5.4
   - pigz=2.8
   - jq=1.7.1
-  - pip:
-      - pysradb==2.4.1
-      - gffutils==0.13
+  - pysradb=2.4.1
+  - gffutils=0.13

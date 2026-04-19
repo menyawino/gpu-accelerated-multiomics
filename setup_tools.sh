@@ -111,6 +111,44 @@ ensure_conda_shell() {
   fi
 }
 
+ensure_mamba() {
+  if command -v mamba >/dev/null 2>&1; then
+    return 0
+  fi
+
+  log "Installing mamba into the base conda environment"
+  conda install -n base -c conda-forge -y mamba
+
+  if ! command -v mamba >/dev/null 2>&1; then
+    hash -r
+  fi
+
+  command -v mamba >/dev/null 2>&1
+}
+
+run_conda_env_update() {
+  local log_file
+  log_file="$(mktemp)"
+
+  if mamba env update -n "$CONDA_ENV_NAME" -f "${PROJECT_ROOT}/envs/workflow.yaml" --prune \
+    2>&1 | tee "$log_file"; then
+    rm -f "$log_file"
+    return 0
+  fi
+
+  if grep -Fq "Cannot link a source that does not exist" "$log_file"; then
+    log "Package cache appears stale; cleaning cache and retrying ${CONDA_ENV_NAME} once with mamba"
+    conda clean --packages --tarballs --yes
+    conda env remove -n "$CONDA_ENV_NAME" --yes >/dev/null 2>&1 || true
+    mamba env update -n "$CONDA_ENV_NAME" -f "${PROJECT_ROOT}/envs/workflow.yaml" --prune
+    rm -f "$log_file"
+    return 0
+  fi
+
+  rm -f "$log_file"
+  return 1
+}
+
 install_workflow_dependencies() {
   ensure_conda_shell
   if ! command -v conda >/dev/null 2>&1; then
@@ -118,13 +156,15 @@ install_workflow_dependencies() {
     return 1
   fi
 
-  log "Creating/updating conda env: ${CONDA_ENV_NAME}"
-  conda config --set channel_priority strict
-  conda env update -n "$CONDA_ENV_NAME" -f "${PROJECT_ROOT}/envs/workflow.yaml" --prune
+  ensure_mamba
 
-  log "Installing Snakemake launcher env (if needed)"
+  log "Creating/updating workflow env with mamba: ${CONDA_ENV_NAME}"
+  conda config --set channel_priority strict
+  run_conda_env_update
+
+  log "Installing Snakemake launcher env with mamba (if needed)"
   if ! command -v snakemake >/dev/null 2>&1; then
-    conda create -y -n hf_metab_snakemake -c conda-forge -c bioconda snakemake=8.30.0 mamba
+    mamba create -y -n hf_metab_snakemake -c conda-forge -c bioconda snakemake=8.30.0 mamba
   fi
 }
 
