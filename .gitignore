@@ -48,3 +48,6 @@ resources/ref/bismark_genome/
 
 # Local notebooks/checkpoints
 .ipynb_checkpoints/
+run_output.log
+analysis_output.log
+dry_run_output.log

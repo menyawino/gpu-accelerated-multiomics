@@ -126,21 +126,48 @@ ensure_mamba() {
   command -v mamba >/dev/null 2>&1
 }
 
+env_python_path() {
+  local conda_base
+  conda_base="$(conda info --base)"
+  printf "%s\n" "${conda_base}/envs/${1}/bin/python"
+}
+
+remove_invalid_env_if_needed() {
+  local env_name="$1"
+  local python_path
+
+  python_path="$(env_python_path "$env_name")"
+  if [[ -d "$(dirname "$python_path")" && ! -x "$python_path" ]]; then
+    log "Removing invalid conda environment ${env_name} because ${python_path} is missing"
+    conda env remove -n "$env_name" --yes >/dev/null 2>&1 || rm -rf "$(dirname "$python_path")/.."
+  fi
+}
+
 run_conda_env_update() {
   local log_file
+  local python_path
   log_file="$(mktemp)"
+  python_path="$(env_python_path "$CONDA_ENV_NAME")"
 
-  if mamba env update -n "$CONDA_ENV_NAME" -f "${PROJECT_ROOT}/envs/workflow.yaml" --prune \
-    2>&1 | tee "$log_file"; then
-    rm -f "$log_file"
-    return 0
+  if [[ -x "$python_path" ]]; then
+    if mamba env update -n "$CONDA_ENV_NAME" -f "${PROJECT_ROOT}/envs/workflow.yaml" --prune \
+      2>&1 | tee "$log_file"; then
+      rm -f "$log_file"
+      return 0
+    fi
+  else
+    if mamba env create -n "$CONDA_ENV_NAME" -f "${PROJECT_ROOT}/envs/workflow.yaml" \
+      2>&1 | tee "$log_file"; then
+      rm -f "$log_file"
+      return 0
+    fi
   fi
 
   if grep -Fq "Cannot link a source that does not exist" "$log_file"; then
     log "Package cache appears stale; cleaning cache and retrying ${CONDA_ENV_NAME} once with mamba"
     conda clean --packages --tarballs --yes
     conda env remove -n "$CONDA_ENV_NAME" --yes >/dev/null 2>&1 || true
-    mamba env update -n "$CONDA_ENV_NAME" -f "${PROJECT_ROOT}/envs/workflow.yaml" --prune
+    mamba env create -n "$CONDA_ENV_NAME" -f "${PROJECT_ROOT}/envs/workflow.yaml"
     rm -f "$log_file"
     return 0
   fi
@@ -157,6 +184,7 @@ install_workflow_dependencies() {
   fi
 
   ensure_mamba
+  remove_invalid_env_if_needed "$CONDA_ENV_NAME"
 
   log "Creating/updating workflow env with mamba: ${CONDA_ENV_NAME}"
   conda config --set channel_priority strict
