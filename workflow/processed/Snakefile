@@ -1,0 +1,225 @@
+from pathlib import Path
+
+configfile: "config/processed_analysis.yaml"
+
+PROCESSED_DIR = config["resources"]["processed_dir"]
+RESULTS_DIR = config["resources"]["results_dir"]
+REPORTS_DIR = config["resources"]["reports_dir"]
+ANALYSIS = config["analysis"]
+INPUTS = config["inputs"]
+
+shell.prefix("set -euo pipefail; ")
+
+rule all:
+    input:
+        f"{RESULTS_DIR}/gse123976/deg.tsv",
+        f"{RESULTS_DIR}/gse123976/integrated_gene_classes.tsv",
+        f"{RESULTS_DIR}/gse123976/enrichment.tsv",
+        f"{RESULTS_DIR}/gse123976/qc_volcano.png",
+        f"{RESULTS_DIR}/gse197670/dmp.tsv",
+        f"{RESULTS_DIR}/gse197670/gene_promoter_summary.tsv",
+        f"{RESULTS_DIR}/gse197670/concordance.tsv",
+        f"{RESULTS_DIR}/gse197670/concordance_plot.png",
+        f"{RESULTS_DIR}/gse116250/dcm_vs_nf_deg.tsv",
+        f"{RESULTS_DIR}/gse116250/icm_vs_nf_deg.tsv",
+        f"{RESULTS_DIR}/gse116250/gsea.tsv",
+        f"{RESULTS_DIR}/gse116250/signature_scores.tsv",
+        f"{RESULTS_DIR}/gse116250/signature_score_plot.png",
+        f"{RESULTS_DIR}/integration/integrated_gene_summary.tsv",
+        f"{REPORTS_DIR}/gse123976_validation_report.qmd",
+
+
+rule validate_inputs:
+    output:
+        f"{RESULTS_DIR}/checks/inputs_validated.txt"
+    conda:
+        "../../envs/processed.yaml"
+    shell:
+        (
+            "mkdir -p {RESULTS_DIR}/checks && "
+            "python scripts/validate_processed_inputs.py "
+            "--config config/processed_analysis.yaml "
+            "--touch {output}"
+        )
+
+
+rule gse123976_reproduce:
+    input:
+        checks=f"{RESULTS_DIR}/checks/inputs_validated.txt"
+    output:
+        deg=f"{RESULTS_DIR}/gse123976/deg.tsv",
+        integrated=f"{RESULTS_DIR}/gse123976/integrated_gene_classes.tsv",
+        enrichment=f"{RESULTS_DIR}/gse123976/enrichment.tsv",
+        qc_plot=f"{RESULTS_DIR}/gse123976/qc_volcano.png",
+        qc_summary=f"{RESULTS_DIR}/gse123976/qc_summary.tsv"
+    params:
+        rna_matrix=INPUTS["gse123976"]["rna_matrix"],
+        rna_metadata=INPUTS["gse123976"]["rna_metadata"],
+        methylation_table=INPUTS["gse123976"]["methylation_table"],
+        methylation_gene_column=INPUTS["gse123976"]["methylation_gene_column"],
+        methylation_effect_column=INPUTS["gse123976"]["methylation_effect_column"],
+        methylation_pvalue_column=INPUTS["gse123976"]["methylation_pvalue_column"],
+        hf_label=INPUTS["gse123976"]["hf_label"],
+        control_label=INPUTS["gse123976"]["control_label"],
+        pathways_gmt=INPUTS["pathways_gmt"],
+        fdr=ANALYSIS["fdr_threshold"],
+        lfc=ANALYSIS["log2fc_threshold"],
+        min_group=ANALYSIS["min_group_size"],
+    conda:
+        "../../envs/processed.yaml"
+    shell:
+        (
+            "mkdir -p {RESULTS_DIR}/gse123976 && "
+            "python scripts/gse123976_reproduce.py "
+            "--rna-matrix {params.rna_matrix} "
+            "--rna-metadata {params.rna_metadata} "
+            "--methylation-table {params.methylation_table} "
+            "--methylation-gene-column {params.methylation_gene_column} "
+            "--methylation-effect-column {params.methylation_effect_column} "
+            "--methylation-pvalue-column {params.methylation_pvalue_column} "
+            "--hf-label {params.hf_label} "
+            "--control-label {params.control_label} "
+            "--pathways-gmt {params.pathways_gmt} "
+            "--fdr-threshold {params.fdr} "
+            "--log2fc-threshold {params.lfc} "
+            "--min-group-size {params.min_group} "
+            "--out-deg {output.deg} "
+            "--out-integrated {output.integrated} "
+            "--out-enrichment {output.enrichment} "
+            "--out-qc-plot {output.qc_plot} "
+            "--out-qc-summary {output.qc_summary}"
+        )
+
+
+rule gse197670_validate:
+    input:
+        integrated=f"{RESULTS_DIR}/gse123976/integrated_gene_classes.tsv"
+    output:
+        dmp=f"{RESULTS_DIR}/gse197670/dmp.tsv",
+        promoter=f"{RESULTS_DIR}/gse197670/gene_promoter_summary.tsv",
+        concordance=f"{RESULTS_DIR}/gse197670/concordance.tsv",
+        plot=f"{RESULTS_DIR}/gse197670/concordance_plot.png",
+        qc=f"{RESULTS_DIR}/gse197670/probe_qc_summary.tsv"
+    params:
+        beta_matrix=INPUTS["gse197670"]["beta_matrix"],
+        metadata=INPUTS["gse197670"]["metadata"],
+        probe_annotation=INPUTS["gse197670"]["probe_annotation"],
+        control_label=INPUTS["gse197670"]["control_label"],
+        disease_labels=",".join(INPUTS["gse197670"]["disease_labels"]),
+        fdr=ANALYSIS["fdr_threshold"],
+        permutations=ANALYSIS["permutations"],
+        seed=ANALYSIS["random_seed"],
+        min_group=ANALYSIS["min_group_size"],
+    conda:
+        "../../envs/processed.yaml"
+    shell:
+        (
+            "mkdir -p {RESULTS_DIR}/gse197670 && "
+            "python scripts/gse197670_validate_methylation.py "
+            "--beta-matrix {params.beta_matrix} "
+            "--metadata {params.metadata} "
+            "--probe-annotation {params.probe_annotation} "
+            "--discovery-integrated {input.integrated} "
+            "--control-label {params.control_label} "
+            "--disease-labels {params.disease_labels} "
+            "--fdr-threshold {params.fdr} "
+            "--permutations {params.permutations} "
+            "--seed {params.seed} "
+            "--min-group-size {params.min_group} "
+            "--out-dmp {output.dmp} "
+            "--out-gene-promoter {output.promoter} "
+            "--out-concordance {output.concordance} "
+            "--out-plot {output.plot} "
+            "--out-qc {output.qc}"
+        )
+
+
+rule gse116250_validate:
+    input:
+        integrated=f"{RESULTS_DIR}/gse123976/integrated_gene_classes.tsv"
+    output:
+        dcm_deg=f"{RESULTS_DIR}/gse116250/dcm_vs_nf_deg.tsv",
+        icm_deg=f"{RESULTS_DIR}/gse116250/icm_vs_nf_deg.tsv",
+        gsea=f"{RESULTS_DIR}/gse116250/gsea.tsv",
+        stats=f"{RESULTS_DIR}/gse116250/validation_stats.tsv",
+        scores=f"{RESULTS_DIR}/gse116250/signature_scores.tsv",
+        plot=f"{RESULTS_DIR}/gse116250/signature_score_plot.png"
+    params:
+        rna_matrix=INPUTS["gse116250"]["rna_matrix"],
+        metadata=INPUTS["gse116250"]["metadata"],
+        control_label=INPUTS["gse116250"]["control_label"],
+        dcm_label=INPUTS["gse116250"]["dcm_label"],
+        icm_label=INPUTS["gse116250"]["icm_label"],
+        fdr=ANALYSIS["fdr_threshold"],
+        lfc=ANALYSIS["log2fc_threshold"],
+        permutations=ANALYSIS["permutations"],
+        seed=ANALYSIS["random_seed"],
+        min_group=ANALYSIS["min_group_size"],
+    conda:
+        "../../envs/processed.yaml"
+    shell:
+        (
+            "mkdir -p {RESULTS_DIR}/gse116250 && "
+            "python scripts/gse116250_validate_rna.py "
+            "--rna-matrix {params.rna_matrix} "
+            "--metadata {params.metadata} "
+            "--discovery-integrated {input.integrated} "
+            "--control-label {params.control_label} "
+            "--dcm-label {params.dcm_label} "
+            "--icm-label {params.icm_label} "
+            "--fdr-threshold {params.fdr} "
+            "--log2fc-threshold {params.lfc} "
+            "--permutations {params.permutations} "
+            "--seed {params.seed} "
+            "--min-group-size {params.min_group} "
+            "--out-dcm-deg {output.dcm_deg} "
+            "--out-icm-deg {output.icm_deg} "
+            "--out-gsea {output.gsea} "
+            "--out-validation-stats {output.stats} "
+            "--out-signature-scores {output.scores} "
+            "--out-plot {output.plot}"
+        )
+
+
+rule integrate_summary:
+    input:
+        discovery=f"{RESULTS_DIR}/gse123976/integrated_gene_classes.tsv",
+        meth=f"{RESULTS_DIR}/gse197670/gene_promoter_summary.tsv",
+        dcm=f"{RESULTS_DIR}/gse116250/dcm_vs_nf_deg.tsv",
+        icm=f"{RESULTS_DIR}/gse116250/icm_vs_nf_deg.tsv"
+    output:
+        summary=f"{RESULTS_DIR}/integration/integrated_gene_summary.tsv"
+    conda:
+        "../../envs/processed.yaml"
+    shell:
+        (
+            "mkdir -p {RESULTS_DIR}/integration && "
+            "python scripts/build_integrated_summary.py "
+            "--discovery {input.discovery} "
+            "--methylation-validation {input.meth} "
+            "--dcm-validation {input.dcm} "
+            "--icm-validation {input.icm} "
+            "--out-summary {output.summary}"
+        )
+
+
+rule render_report:
+    input:
+        discovery=f"{RESULTS_DIR}/gse123976/integrated_gene_classes.tsv",
+        meth_stats=f"{RESULTS_DIR}/gse197670/concordance.tsv",
+        rna_stats=f"{RESULTS_DIR}/gse116250/validation_stats.tsv",
+        summary=f"{RESULTS_DIR}/integration/integrated_gene_summary.tsv"
+    output:
+        report=f"{REPORTS_DIR}/gse123976_validation_report.qmd"
+    conda:
+        "../../envs/processed.yaml"
+    shell:
+        (
+            "mkdir -p {REPORTS_DIR} && "
+            "python scripts/render_validation_report.py "
+            "--discovery {input.discovery} "
+            "--methylation-stats {input.meth_stats} "
+            "--rna-stats {input.rna_stats} "
+            "--integrated-summary {input.summary} "
+            "--out-report {output.report}"
+        )

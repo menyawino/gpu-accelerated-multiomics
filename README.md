@@ -95,3 +95,60 @@ Columns required:
 - `results/network/isoform_network_edges.tsv`
 - `results/network/gene_network.graphml`
 - `results/network/isoform_network.graphml`
+
+## Reproduce and validate GSE123976 methylation–expression program
+
+This processed-data pipeline reproduces discovery signals from GSE123976 and validates them externally using methylation-array and transcriptome cohorts.
+
+### 1) Prepare processed inputs
+
+Place processed matrices/metadata in the standardized layout described in:
+
+- `data/processed/README.md`
+
+Optional helper for direct GEO supplementary downloads:
+
+```bash
+python scripts/download_processed_geo.py --dataset gse123976 --outdir data/processed/gse123976 --url <GEO_SUPPL_URL>
+```
+
+### 2) Configure
+
+Pipeline config is in:
+
+- `config/processed_analysis.yaml`
+
+You can edit labels, thresholds, and file paths there.
+
+### 3) Create environment
+
+```bash
+conda env create -f environment.yml
+conda activate hf_processed
+```
+
+### 4) Run end-to-end
+
+```bash
+chmod +x run_processed_analysis.sh
+./run_processed_analysis.sh --cores 8 --jobs 4
+```
+
+Dry run:
+
+```bash
+./run_processed_analysis.sh --dry-run
+```
+
+### 5) Outputs
+
+- `results/gse123976/`: DEG table, integrated gene classes, enrichment, QC plot
+- `results/gse197670/`: DMP table, promoter gene summaries, concordance stats/plot
+- `results/gse116250/`: DCM/NF + ICM/NF DEG, GSEA-like enrichment, signature scores/plot
+- `results/integration/integrated_gene_summary.tsv`
+- `reports/gse123976_validation_report.qmd`
+
+### Workflow + environment
+
+- Workflow: `workflow/processed/Snakefile` (Snakemake)
+- Environment: `environment.yml` (also `envs/processed.yaml`)
