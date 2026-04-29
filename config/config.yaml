@@ -14,7 +14,7 @@ reference:
   transcripts_fasta: resources/ref/gencode.v44.transcripts.fa
 
 parabricks:
-  enable_gpu_surrogate_alignment: true
+  enable_gpu_surrogate_alignment: false
   runner: scripts/pbrun.sh
   gpu_count: 1
   fq2bam_extra: "--bwa-options=-K 100000000"
@@ -29,6 +29,10 @@ wgbs:
 rnaseq:
   star_overhang: 149
   salmon_libtype: A
+  star_limit_genome_generate_ram: 12000000000
+  star_genome_saindex_nbases: 13
+  star_genome_chr_bin_nbits: 14
+  star_genome_sasparse_d: 3
 
 network:
   correlation_method: spearman
@@ -39,7 +43,7 @@ network:
 compute:
   download_threads: 8
   fastp_threads: 8
-  star_threads: 16
+  star_threads: 4
   salmon_threads: 8
   bismark_threads: 8
   python_threads: 4

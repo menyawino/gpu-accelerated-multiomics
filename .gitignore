@@ -29,11 +29,10 @@ results/
 work/
 temp/
 metadata/
+data/
 
 # Reference indexes (large/reproducible)
-resources/ref/star_index/
-resources/ref/salmon_index/
-resources/ref/bismark_genome/
+resources/
 
 # Optional data drops
 *.sra

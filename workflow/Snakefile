@@ -157,7 +157,11 @@ rule star_index:
             "--genomeDir resources/ref/star_index "
             "--genomeFastaFiles {input.fasta} "
             "--sjdbGTFfile {input.gtf} "
-            "--sjdbOverhang {config[rnaseq][star_overhang]}"
+            "--sjdbOverhang {config[rnaseq][star_overhang]} "
+            "--limitGenomeGenerateRAM {config[rnaseq][star_limit_genome_generate_ram]} "
+            "--genomeSAindexNbases {config[rnaseq][star_genome_saindex_nbases]} "
+            "--genomeChrBinNbits {config[rnaseq][star_genome_chr_bin_nbits]} "
+            "--genomeSAsparseD {config[rnaseq][star_genome_sasparse_d]}"
         )
 
 
@@ -216,7 +220,8 @@ rule rnaseq_star_align:
 rule rnaseq_salmon_isoform_quant:
     input:
         index="resources/ref/salmon_index/versionInfo.json",
-        bam=f"{OUTDIR}/rnaseq/star/{{run}}/{{run}}.Aligned.sortedByCoord.out.bam",
+        r1=f"{OUTDIR}/fastq/trimmed/{{run}}_1.trim.fastq.gz",
+        r2=f"{OUTDIR}/fastq/trimmed/{{run}}_2.trim.fastq.gz",
     output:
         quant=f"{OUTDIR}/rnaseq/salmon/{{run}}/quant.sf",
     threads: config["compute"]["salmon_threads"]
@@ -225,9 +230,9 @@ rule rnaseq_salmon_isoform_quant:
     shell:
         (
             "mkdir -p {OUTDIR}/rnaseq/salmon/{wildcards.run} && "
-            "salmon quant -t {TRANSCRIPTS_FASTA} "
+            "salmon quant -i resources/ref/salmon_index "
             "-l {config[rnaseq][salmon_libtype]} "
-            "-a {input.bam} -p {threads} "
+            "-1 {input.r1} -2 {input.r2} -p {threads} "
             "--gcBias --seqBias "
             "-o {OUTDIR}/rnaseq/salmon/{wildcards.run}"
         )
