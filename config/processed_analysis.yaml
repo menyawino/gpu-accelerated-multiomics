@@ -1,0 +1,44 @@
+project:
+  name: GSE123976_reproduction_validation
+
+resources:
+  processed_dir: data/processed
+  results_dir: results
+  reports_dir: reports
+
+analysis:
+  random_seed: 123
+  fdr_threshold: 0.05
+  log2fc_threshold: 0.58
+  min_group_size: 2
+  permutations: 1000
+
+inputs:
+  pathways_gmt: data/processed/reference/pathways.gmt
+  gse123976:
+    rna_matrix: data/processed/gse123976/rna_expression_matrix.tsv
+    rna_metadata: data/processed/gse123976/rna_metadata.tsv
+    methylation_table: data/processed/gse123976/methylation_gene_table.tsv
+    methylation_gene_column: gene_id
+    methylation_effect_column: delta_methylation
+    methylation_pvalue_column: pvalue
+    hf_label: HF
+    control_label: NF
+  gse197670:
+    beta_matrix: data/processed/gse197670/beta_matrix.tsv
+    metadata: data/processed/gse197670/sample_metadata.tsv
+    probe_annotation: data/processed/gse197670/probe_annotation.tsv
+    control_label: Control
+    disease_labels:
+      - ICM
+      - NICM
+  gse197672:
+    beta_matrix: data/processed/gse197672/beta_matrix.tsv
+    metadata: data/processed/gse197672/sample_metadata.tsv
+    probe_annotation: data/processed/gse197672/probe_annotation.tsv
+  gse116250:
+    rna_matrix: data/processed/gse116250/rna_expression_matrix.tsv
+    metadata: data/processed/gse116250/sample_metadata.tsv
+    control_label: NF
+    dcm_label: DCM
+    icm_label: ICM
