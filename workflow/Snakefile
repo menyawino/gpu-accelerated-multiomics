@@ -26,6 +26,39 @@ def _read_run_list(path):
     return [x.strip() for x in p.read_text().splitlines() if x.strip()]
 
 
+# ---------------------------------------------------------------------------
+# Assay classification helpers
+# Run IDs are pre-classified by discover_runs; we read them from the static
+# metadata lists so trim_fastq can choose the right parameter block.
+# ---------------------------------------------------------------------------
+
+# Read the static lists at DAG-build time when the files already exist.
+_RNASEQ_RUNS_FILE = Path(METADATA_DIR) / "rnaseq_runs.txt"
+_WGBS_RUNS_FILE   = Path(METADATA_DIR) / "wgbs_runs.txt"
+_STATIC_RNASEQ = set(_read_run_list(_RNASEQ_RUNS_FILE)) if _RNASEQ_RUNS_FILE.exists() else set()
+_STATIC_WGBS   = set(_read_run_list(_WGBS_RUNS_FILE))   if _WGBS_RUNS_FILE.exists()   else set()
+
+
+def _assay_type(run: str) -> str:
+    """Return 'rnaseq' or 'wgbs' for a given run accession."""
+    if run in _STATIC_WGBS:
+        return "wgbs"
+    # Default to rnaseq if we can't determine (safer for trimming).
+    return "rnaseq"
+
+
+def _trim_front1(wildcards) -> int:
+    return config[_assay_type(wildcards.run)]["trim_front1"]
+
+
+def _trim_front2(wildcards) -> int:
+    return config[_assay_type(wildcards.run)]["trim_front2"]
+
+
+def _min_read_len(wildcards) -> int:
+    return config[_assay_type(wildcards.run)]["min_read_len"]
+
+
 checkpoint discover_runs:
     output:
         rnaseq_runs_tsv=f"{METADATA_DIR}/rnaseq_runs.tsv",
@@ -81,13 +114,18 @@ def gpu_surrogate_files(wildcards):
 rule all:
     input:
         f"{OUTDIR}/matrices/gene_expression_tpm.tsv",
+        # NOTE: isoform_expression_tpm.tsv is still generated but isoform-level network
+        # analyses are disabled here because the Salmon index lacks genome decoys
+        # (Flaw 8).  Rebuild the decoy-aware Salmon index and re-enable once
+        # isoform quantification has been validated.
         f"{OUTDIR}/matrices/isoform_expression_tpm.tsv",
         f"{OUTDIR}/matrices/gene_methylation_beta.tsv",
+        # Isoform methylation: build_methylation_matrices now writes an empty
+        # placeholder; kept in rule all to avoid breaking downstream expectations.
         f"{OUTDIR}/matrices/isoform_methylation_beta.tsv",
+        # Only gene-level network is produced until decoy-aware isoform quant is ready.
         f"{OUTDIR}/network/gene_network_edges.tsv",
-        f"{OUTDIR}/network/isoform_network_edges.tsv",
         f"{OUTDIR}/network/gene_network.graphml",
-        f"{OUTDIR}/network/isoform_network.graphml",
         rnaseq_quant_files,
         wgbs_cov_files,
         gpu_surrogate_files,
@@ -117,6 +155,12 @@ rule download_sra_fastq:
 
 
 rule trim_fastq:
+    """Assay-aware adapter and quality trimming via fastp.
+
+    WGBS runs use fixed-head trimming ({config[wgbs][trim_front1]} bp) to remove
+    bisulfite adapter artefacts.  RNA-seq runs skip fixed-head trimming
+    ({config[rnaseq][trim_front1]} = 0) to preserve full read length.
+    """
     input:
         r1=f"{OUTDIR}/fastq/raw/{{run}}_1.fastq.gz",
         r2=f"{OUTDIR}/fastq/raw/{{run}}_2.fastq.gz",
@@ -126,6 +170,10 @@ rule trim_fastq:
         html=f"{OUTDIR}/qc/fastp/{{run}}.html",
         json=f"{OUTDIR}/qc/fastp/{{run}}.json",
     threads: config["compute"]["fastp_threads"]
+    params:
+        trim_front1=_trim_front1,
+        trim_front2=_trim_front2,
+        min_read_len=_min_read_len,
     conda:
         "../envs/workflow.yaml"
     shell:
@@ -134,9 +182,9 @@ rule trim_fastq:
             "fastp -i {input.r1} -I {input.r2} "
             "-o {output.r1} -O {output.r2} "
             "--thread {threads} "
-            "--trim_front1 {config[wgbs][trim_front1]} "
-            "--trim_front2 {config[wgbs][trim_front2]} "
-            "--length_required {config[wgbs][min_read_len]} "
+            "--trim_front1 {params.trim_front1} "
+            "--trim_front2 {params.trim_front2} "
+            "--length_required {params.min_read_len} "
             "--html {output.html} --json {output.json}"
         )
 
@@ -166,17 +214,37 @@ rule star_index:
 
 
 rule salmon_index:
+    """Build a decoy-aware Salmon index (selective alignment mode).
+
+    The genome FASTA is used as a decoy to prevent spurious mapping of
+    non-transcriptomic reads, which biases isoform quantification in the
+    absence of decoys (Flaw 8).  The gentrome is a concatenation of the
+    transcriptome and genome; the decoy list contains chromosome names.
+    """
     input:
         transcripts=TRANSCRIPTS_FASTA,
+        genome=GENOME,
     output:
         version_info="resources/ref/salmon_index/versionInfo.json",
     threads: config["compute"]["salmon_threads"]
+    params:
+        gentrome=f"{TEMP_DIR}/salmon_gentrome.fa",
+        decoys=f"{TEMP_DIR}/salmon_decoys.txt",
     conda:
         "../envs/workflow.yaml"
     shell:
         (
-            "mkdir -p resources/ref/salmon_index && "
-            "salmon index -t {input.transcripts} -i resources/ref/salmon_index -p {threads}"
+            "mkdir -p resources/ref/salmon_index {TEMP_DIR} && "
+            # Extract chromosome names from the genome for the decoy list.
+            "grep '^>' {input.genome} | cut -d ' ' -f 1 | sed 's/>//' "
+            "  > {params.decoys} && "
+            # Concatenate transcriptome + genome as gentrome.
+            "cat {input.transcripts} {input.genome} > {params.gentrome} && "
+            "salmon index "
+            "  -t {params.gentrome} "
+            "  -d {params.decoys} "
+            "  -i resources/ref/salmon_index "
+            "  -p {threads}"
         )
 
 
@@ -383,4 +451,58 @@ rule build_multiomic_network:
             "--out-iso-edges {output.iso_edges} "
             "--out-gene-graphml {output.gene_graph} "
             "--out-iso-graphml {output.iso_graph}"
+        )
+
+
+rule arm1_discovery_signatures:
+    input:
+        gene_meth="results/real_processed/inputs/gse123976_methylation.tsv",
+        metadata="results/real_processed/inputs/gse123976_expression_metadata.tsv",
+        gtf=GTF,
+    output:
+        hyper="results/real_processed/outputs/arm1_hypermethylated.tsv",
+        hypo="results/real_processed/outputs/arm1_hypomethylated.tsv",
+        summary="results/real_processed/outputs/arm1_discovery_summary.tsv",
+    conda:
+        "../envs/workflow.yaml"
+    shell:
+        (
+            "mkdir -p results/real_processed/outputs && "
+            "python scripts/arm1_discovery_methylation_signatures.py "
+            "--gene-methylation {input.gene_meth} "
+            "--metadata {input.metadata} "
+            "--gtf {input.gtf} "
+            "--out-hypermethylated {output.hyper} "
+            "--out-hypomethylated {output.hypo} "
+            "--out-summary {output.summary}"
+        )
+
+
+rule arm2_discovery_signatures:
+    input:
+        gene_expr="results/real_processed/inputs/gse123976_expression.tsv",
+        gene_meth="results/real_processed/inputs/gse123976_methylation.tsv",
+        metadata="results/real_processed/inputs/gse123976_expression_metadata.tsv",
+        hyper="results/real_processed/outputs/arm1_hypermethylated.tsv",
+        hypo="results/real_processed/outputs/arm1_hypomethylated.tsv",
+    output:
+        hyper_down="results/real_processed/outputs/arm2_hyper_down.tsv",
+        hypo_up="results/real_processed/outputs/arm2_hypo_up.tsv",
+        degs="results/real_processed/outputs/arm2_degs.tsv",
+        summary="results/real_processed/outputs/arm2_discovery_summary.tsv",
+    conda:
+        "../envs/workflow.yaml"
+    shell:
+        (
+            "mkdir -p results/real_processed/outputs && "
+            "python scripts/arm2_discovery_transcriptome_signatures.py "
+            "--gene-expression {input.gene_expr} "
+            "--gene-methylation {input.gene_meth} "
+            "--metadata {input.metadata} "
+            "--hyper-signature {input.hyper} "
+            "--hypo-signature {input.hypo} "
+            "--out-degs {output.degs} "
+            "--out-hyper-down {output.hyper_down} "
+            "--out-hypo-up {output.hypo_up} "
+            "--out-summary {output.summary}"
         )

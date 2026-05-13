@@ -126,7 +126,15 @@ def prepare_gse123976_expression(base_dir: Path, out_dir: Path) -> None:
     pd.DataFrame(rows).to_csv(out_dir / "gse123976_expression_metadata.tsv", sep="\t", index=False)
 
 
-def prepare_gse123976_methylation(base_dir: Path, out_dir: Path) -> None:
+def prepare_gse123976_methylation(base_dir: Path, out_dir: Path, allow_prefiltered: bool = False) -> None:
+    if not allow_prefiltered:
+        raise RuntimeError(
+            "Refusing to build GSE123976 methylation matrix from pre-filtered DMC input "
+            "(sheet: 'DMCs - Q < 0.05'). This causes data leakage in discovery/validation. "
+            "Provide unfiltered methylation input or rerun with "
+            "--allow-prefiltered-gse123976-methylation for exploratory-only runs."
+        )
+
     gz_xlsx = base_dir / "GSE123976_Table_S1_DMCsv2.xlsx.gz"
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_xlsx = Path(tmpdir) / "gse123976_dmc.xlsx"
@@ -194,7 +202,10 @@ def prepare_gse116250(base_dir: Path, out_dir: Path) -> None:
 
 def build_gse197670_metadata(base_dir: Path) -> pd.DataFrame:
     rows = []
-    for name in ["GSE197670-GPL13534_series_matrix.txt.gz", "GSE197670-GPL21145_series_matrix.txt.gz"]:
+    for name, platform_id in [
+        ("GSE197670-GPL13534_series_matrix.txt.gz", "GPL13534"),
+        ("GSE197670-GPL21145_series_matrix.txt.gz", "GPL21145"),
+    ]:
         meta = parse_geo_series_matrix(base_dir / name)
         for row in build_characteristics(meta):
             sample_id = row["title"].split(":", 1)[0].strip()
@@ -205,6 +216,7 @@ def build_gse197670_metadata(base_dir: Path) -> pd.DataFrame:
                 {
                     "sample_id": sample_id,
                     "phenotype": phenotype,
+                    "platform": platform_id,
                     "lvad_status": lvad,
                     "hf_etiology": etiology,
                     "age": row.get("age", ""),
@@ -287,21 +299,41 @@ def prepare_gse197670(base_dir: Path, out_dir: Path) -> None:
 
     if not metadata.empty:
         by_pheno = dict(zip(metadata["sample_id"], metadata["phenotype"]))
+        by_platform = dict(zip(metadata["sample_id"], metadata["platform"]))
         for phenotype, filename in [("pre_LVAD", "gse197670_methylation_pre_lvad.tsv"), ("NF", "gse197670_methylation_nonfailing.tsv")]:
             keep = [col for col in matrix.columns if by_pheno.get(col) == phenotype]
             if keep:
-                matrix[keep].to_csv(out_dir / filename, sep="\t")
+                sub = matrix[keep].copy()
+                # Add a platform annotation row as the first index entry so downstream
+                # scripts can stratify by array platform (GPL13534 vs GPL21145).
+                platform_row = pd.DataFrame(
+                    {col: [by_platform.get(col, "unknown")] for col in keep},
+                    index=["__platform__"],
+                )
+                pd.concat([platform_row, sub]).to_csv(out_dir / filename, sep="\t")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Prepare real GEO processed inputs for downstream analysis")
     ap.add_argument("--data-root", type=Path, default=Path("data/ncbi"))
     ap.add_argument("--out-dir", type=Path, default=Path("results/real_processed/inputs"))
+    ap.add_argument(
+        "--allow-prefiltered-gse123976-methylation",
+        action="store_true",
+        help=(
+            "Allow building GSE123976 methylation matrix from pre-filtered DMC sheet "
+            "('DMCs - Q < 0.05'). Exploratory-only: this introduces leakage."
+        ),
+    )
     args = ap.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     prepare_gse123976_expression(args.data_root / "GSE123976", args.out_dir)
-    prepare_gse123976_methylation(args.data_root / "GSE123976", args.out_dir)
+    prepare_gse123976_methylation(
+        args.data_root / "GSE123976",
+        args.out_dir,
+        allow_prefiltered=args.allow_prefiltered_gse123976_methylation,
+    )
     prepare_gse116250(args.data_root / "GSE116250", args.out_dir)
     prepare_gse197670(args.data_root / "GSE197670", args.out_dir)
 

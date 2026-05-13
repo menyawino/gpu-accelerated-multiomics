@@ -149,8 +149,10 @@ def discover(gse: str, metadata_dir: Path, manual_pairs_path: Path):
         pairs.to_csv(pairs_path, sep="\t", index=False)
 
     if len(pairs) == 0:
-        print(
-            "WARNING: No matched RNA/WGBS pairs inferred. Provide config/manual_pairs.tsv for deterministic pairing."
+        raise RuntimeError(
+            "No matched RNA-seq/WGBS pairs inferred from GEO metadata for GSE123976. "
+            "Provide a manual pairing file at config/manual_pairs.tsv with columns: "
+            "subject_id, rnaseq_run, wgbs_run"
         )
 
 

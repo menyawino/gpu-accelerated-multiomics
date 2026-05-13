@@ -7,13 +7,24 @@ from pathlib import Path
 import pandas as pd
 from pybedtools import BedTool
 
+# Promoter window relative to TSS (strand-aware):
+#   upstream (bp before TSS) and downstream (bp after TSS).
+PROMOTER_UPSTREAM_BP = 2000
+PROMOTER_DOWNSTREAM_BP = 500
 
-def parse_gtf_regions(gtf_path: Path):
-    gene_rows = []
-    tx_rows = []
 
+def parse_gtf_promoters(gtf_path: Path):
+    """Extract strand-aware promoter windows for each gene from a GTF file.
+
+    Promoter is defined as [TSS - PROMOTER_UPSTREAM_BP, TSS + PROMOTER_DOWNSTREAM_BP].
+    For '+' strand genes TSS = start; for '-' strand genes TSS = end.
+    One promoter region is emitted per unique (gene_id, strand) pair using the most
+    extreme TSS across all transcripts of that gene.
+    """
     pat_gid = re.compile(r'gene_id "([^"]+)"')
-    pat_tid = re.compile(r'transcript_id "([^"]+)"')
+
+    # Collect the min-start and max-end per gene to find canonical TSS.
+    gene_info: dict[str, tuple[str, int, int, str]] = {}  # gene_id -> (chrom, min_start, max_end, strand)
 
     with gtf_path.open() as f:
         for line in f:
@@ -23,20 +34,31 @@ def parse_gtf_regions(gtf_path: Path):
             if len(fields) < 9:
                 continue
             chrom, _, feature, start, end, _, strand, _, attrs = fields
+            if feature != "gene":
+                continue
             m_gid = pat_gid.search(attrs)
-            m_tid = pat_tid.search(attrs)
-            if feature == "gene" and m_gid:
-                gid = m_gid.group(1)
-                gene_rows.append((chrom, int(start) - 1, int(end), gid, strand))
-            elif feature == "transcript" and m_gid and m_tid:
-                gid = m_gid.group(1)
-                tid = m_tid.group(1)
-                tx_rows.append((chrom, int(start) - 1, int(end), tid, gid, strand))
+            if not m_gid:
+                continue
+            gid = m_gid.group(1)
+            s, e = int(start) - 1, int(end)  # GTF is 1-based; convert to 0-based half-open
+            if gid not in gene_info:
+                gene_info[gid] = (chrom, s, e, strand)
+            else:
+                prev = gene_info[gid]
+                gene_info[gid] = (chrom, min(prev[1], s), max(prev[2], e), strand)
 
-    genes = pd.DataFrame(gene_rows, columns=["chrom", "start", "end", "gene_id", "strand"])
-    tx = pd.DataFrame(tx_rows, columns=["chrom", "start", "end", "isoform_id", "gene_id", "strand"])
+    rows = []
+    for gid, (chrom, gstart, gend, strand) in gene_info.items():
+        if strand == "+":
+            tss = gstart
+        else:
+            tss = gend  # 0-based exclusive end = last base of gene body = TSS for '-' strand
+        prom_start = max(0, tss - PROMOTER_UPSTREAM_BP)
+        prom_end = tss + PROMOTER_DOWNSTREAM_BP
+        rows.append((chrom, prom_start, prom_end, gid, strand))
 
-    return genes, tx
+    promoters = pd.DataFrame(rows, columns=["chrom", "start", "end", "gene_id", "strand"])
+    return promoters
 
 
 def methyl_cov_to_bed(cov_path: Path) -> pd.DataFrame:
@@ -92,22 +114,32 @@ def main():
     ap.add_argument("--gtf", required=True, type=Path)
     ap.add_argument("--methyl-dir", required=True, type=Path)
     ap.add_argument("--out-gene", required=True, type=Path)
-    ap.add_argument("--out-isoform", required=True, type=Path)
+    ap.add_argument(
+        "--out-isoform",
+        required=False,
+        type=Path,
+        default=None,
+        help=(
+            "Deprecated. Isoform-level methylation is not computed (promoter windows "
+            "are gene-level). Providing this argument writes an empty placeholder."
+        ),
+    )
     args = ap.parse_args()
 
     wgbs = pd.read_csv(args.wgbs_runs, sep="\t") if args.wgbs_runs.exists() else pd.DataFrame()
     if wgbs.empty or "wgbs_run" not in wgbs.columns:
         pd.DataFrame().to_csv(args.out_gene, sep="\t")
-        pd.DataFrame().to_csv(args.out_isoform, sep="\t")
+        if args.out_isoform:
+            pd.DataFrame().to_csv(args.out_isoform, sep="\t")
         return
 
     pairs = load_pairs(args.matched_pairs)
     keep_runs = set(pairs["wgbs_run"].astype(str)) if not pairs.empty else set(wgbs["wgbs_run"].astype(str))
 
-    genes, isoforms = parse_gtf_regions(args.gtf)
+    # Use promoter-restricted regions only (TSS-2000 to TSS+500, strand-aware).
+    promoters = parse_gtf_promoters(args.gtf)
 
     gene_frames = []
-    iso_frames = []
 
     for run in sorted(keep_runs):
         cov = args.methyl_dir / run / f"{run}.bismark.cov.gz"
@@ -115,17 +147,18 @@ def main():
             continue
         cpg = methyl_cov_to_bed(cov)
 
-        gser = summarize_beta(cpg, genes, "gene_id").rename(run)
-        iser = summarize_beta(cpg, isoforms, "isoform_id").rename(run)
-
+        gser = summarize_beta(cpg, promoters, "gene_id").rename(run)
         gene_frames.append(gser)
-        iso_frames.append(iser)
 
     gene_mat = pd.concat(gene_frames, axis=1).fillna(0.0) if gene_frames else pd.DataFrame()
-    iso_mat = pd.concat(iso_frames, axis=1).fillna(0.0) if iso_frames else pd.DataFrame()
-
     gene_mat.to_csv(args.out_gene, sep="\t")
-    iso_mat.to_csv(args.out_isoform, sep="\t")
+
+    # Write empty isoform placeholder so downstream rules that depend on the file don't fail.
+    if args.out_isoform:
+        pd.DataFrame(
+            columns=gene_mat.columns,
+            dtype=float,
+        ).to_csv(args.out_isoform, sep="\t")
 
 
 if __name__ == "__main__":

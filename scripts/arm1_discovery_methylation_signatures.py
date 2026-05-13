@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pandas as pd
 import numpy as np
-from scipy.stats import zscore
+from scipy.stats import zscore, mannwhitneyu
 from statsmodels.stats.multitest import multipletests
 
 
@@ -215,6 +215,68 @@ def identify_hypomethylated_genes(gene_meth_matrix, delta_beta_threshold=0.2, n_
     return result.reset_index().sort_values("mean_beta", ascending=True)
 
 
+def identify_differential_methylation(
+    gene_meth_matrix: pd.DataFrame,
+    phenotype_dict: dict[str, str],
+    hf_phenotypes: set[str],
+    nf_phenotype: str = "NF",
+    delta_beta_threshold: float = 0.2,
+    fdr_cutoff: float = 0.05,
+    n_samples_min: int = 3,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Identify hyper/hypo methylated genes using HF-vs-NF differential testing."""
+    nf_samples = [s for s in gene_meth_matrix.columns if phenotype_dict.get(s) == nf_phenotype]
+    hf_samples = [s for s in gene_meth_matrix.columns if phenotype_dict.get(s) in hf_phenotypes]
+
+    if len(nf_samples) < n_samples_min or len(hf_samples) < n_samples_min:
+        raise ValueError(
+            f"Insufficient samples for differential methylation: NF={len(nf_samples)}, HF={len(hf_samples)}"
+        )
+
+    rows = []
+    for gene_id in gene_meth_matrix.index:
+        nf_vals = pd.to_numeric(gene_meth_matrix.reindex(index=[gene_id], columns=nf_samples).iloc[0], errors="coerce")
+        hf_vals = pd.to_numeric(gene_meth_matrix.reindex(index=[gene_id], columns=hf_samples).iloc[0], errors="coerce")
+
+        nf = nf_vals.dropna().values.astype(float)
+        hf = hf_vals.dropna().values.astype(float)
+
+        if len(nf) < n_samples_min or len(hf) < n_samples_min:
+            continue
+
+        stat, pvalue = mannwhitneyu(hf, nf, alternative="two-sided")
+        delta_beta = float(np.mean(hf) - np.mean(nf))
+
+        rows.append(
+            {
+                "gene_id": gene_id,
+                "hf_mean_beta": float(np.mean(hf)),
+                "nf_mean_beta": float(np.mean(nf)),
+                "delta_beta": delta_beta,
+                "pvalue": float(pvalue),
+                "n_hf": int(len(hf)),
+                "n_nf": int(len(nf)),
+            }
+        )
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    out["fdr"] = multipletests(out["pvalue"].values, method="fdr_bh")[1]
+    sig = out[(out["fdr"] <= fdr_cutoff) & (out["delta_beta"].abs() >= delta_beta_threshold)].copy()
+
+    hyper = sig[sig["delta_beta"] > 0].copy()
+    hyper["classification"] = "hypermethylated"
+    hyper = hyper.sort_values("delta_beta", ascending=False)
+
+    hypo = sig[sig["delta_beta"] < 0].copy()
+    hypo["classification"] = "hypomethylated"
+    hypo = hypo.sort_values("delta_beta", ascending=True)
+
+    return hyper, hypo
+
+
 def assign_pathway_context(genes, pathway_genesets_dict):
     """
     Annotate genes with pathway membership.
@@ -243,12 +305,16 @@ def main():
     )
     ap.add_argument("--gene-methylation", required=True, type=Path,
                    help="Gene-level methylation matrix (genes x samples)")
+    ap.add_argument("--metadata", required=True, type=Path,
+                   help="Sample metadata TSV with phenotype column")
     ap.add_argument("--gtf", required=True, type=Path,
                    help="GTF annotation file")
     ap.add_argument("--pathway-genesets", type=Path,
                    help="TSV: pathway_name<TAB>gene1,gene2,... (optional)")
     ap.add_argument("--delta-beta-threshold", type=float, default=0.2,
                    help="Methylation change threshold for classification")
+    ap.add_argument("--fdr-cutoff", type=float, default=0.05,
+                   help="FDR cutoff for differential methylation (default: 0.05)")
     ap.add_argument("--min-samples", type=int, default=3,
                    help="Minimum non-missing samples per gene")
     ap.add_argument("--out-hypermethylated", required=True, type=Path,
@@ -264,6 +330,14 @@ def main():
     logger.info(f"Loading gene methylation matrix from {args.gene_methylation}")
     gene_meth = pd.read_csv(args.gene_methylation, sep="\t", index_col=0)
     logger.info(f"Loaded {gene_meth.shape[0]} genes x {gene_meth.shape[1]} samples")
+
+    meta = pd.read_csv(args.metadata, sep="\t")
+    sample_col = meta.columns[0]
+    pheno_col = "phenotype" if "phenotype" in meta.columns else meta.columns[1]
+    phenotype_dict = {
+        str(sample): str(pheno)
+        for sample, pheno in zip(meta[sample_col].astype(str), meta[pheno_col].astype(str))
+    }
     
     # Load pathway genesets if provided
     pathway_genesets = {}
@@ -280,32 +354,30 @@ def main():
                     pathway_genesets[pathway] = genes
         logger.info(f"Loaded {len(pathway_genesets)} pathways")
     
-    # Identify hypermethylated genes
-    logger.info("Identifying promoter hypermethylated genes...")
-    hyper = identify_hypermethylated_genes(
-        gene_meth, 
+    # Identify hyper/hypomethylated genes via differential testing
+    logger.info("Identifying differential methylation signatures (HF vs NF)...")
+    hyper, hypo = identify_differential_methylation(
+        gene_meth,
+        phenotype_dict=phenotype_dict,
+        hf_phenotypes={"HF", "DCM", "ICM"},
+        nf_phenotype="NF",
         delta_beta_threshold=args.delta_beta_threshold,
-        n_samples_min=args.min_samples
+        fdr_cutoff=args.fdr_cutoff,
+        n_samples_min=args.min_samples,
     )
+
     logger.info(f"Found {len(hyper)} hypermethylated genes")
     
-    if pathway_genesets:
+    if pathway_genesets and not hyper.empty:
         hyper_pathways = assign_pathway_context(hyper["gene_id"], pathway_genesets)
         hyper = hyper.merge(hyper_pathways, on="gene_id", how="left")
     
     hyper.to_csv(args.out_hypermethylated, sep="\t", index=False)
     logger.info(f"Saved to {args.out_hypermethylated}")
     
-    # Identify hypomethylated genes
-    logger.info("Identifying promoter hypomethylated genes...")
-    hypo = identify_hypomethylated_genes(
-        gene_meth,
-        delta_beta_threshold=args.delta_beta_threshold,
-        n_samples_min=args.min_samples
-    )
     logger.info(f"Found {len(hypo)} hypomethylated genes")
     
-    if pathway_genesets:
+    if pathway_genesets and not hypo.empty:
         hypo_pathways = assign_pathway_context(hypo["gene_id"], pathway_genesets)
         hypo = hypo.merge(hypo_pathways, on="gene_id", how="left")
     
@@ -319,6 +391,7 @@ def main():
         "hypermethylated_count": len(hyper),
         "hypomethylated_count": len(hypo),
         "delta_beta_threshold": args.delta_beta_threshold,
+        "fdr_cutoff": args.fdr_cutoff,
         "min_samples": args.min_samples,
         "pathways_included": len(pathway_genesets)
     }

@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
 
 
 def configure_style() -> dict:
@@ -56,10 +57,10 @@ def load_tsv(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, sep="\t")
 
 
-def plot_arm1_discovery(data_dir: Path, out_dir: Path, palette: dict) -> None:
+def plot_arm1_discovery(data_dir: Path, inputs_dir: Path, out_dir: Path, palette: dict) -> None:
     hyper = load_tsv(data_dir / "arm1_hypermethylated.tsv")
     hypo = load_tsv(data_dir / "arm1_hypomethylated.tsv")
-    meth = pd.read_csv(data_dir.parent / "gse123976_gene_methylation.tsv", sep="\t", index_col=0)
+    meth = pd.read_csv(inputs_dir / "gse123976_methylation.tsv", sep="\t", index_col=0)
 
     mean_beta_all = meth.mean(axis=1)
     non_sig = mean_beta_all[~mean_beta_all.index.isin(set(hyper["gene_id"]).union(set(hypo["gene_id"])))].values
@@ -82,7 +83,7 @@ def plot_arm1_discovery(data_dir: Path, out_dir: Path, palette: dict) -> None:
     top_hyper = hyper.nlargest(top_n, "mean_beta")
     top_hypo = hypo.nsmallest(top_n, "mean_beta")
     axes[1].scatter(
-        top_hyper["z_score"],
+        top_hyper["mean_meth_diff"],
         top_hyper["mean_beta"],
         s=40,
         color=palette["hyper"],
@@ -90,14 +91,14 @@ def plot_arm1_discovery(data_dir: Path, out_dir: Path, palette: dict) -> None:
         alpha=0.9,
     )
     axes[1].scatter(
-        top_hypo["z_score"],
+        top_hypo["mean_meth_diff"],
         top_hypo["mean_beta"],
         s=40,
         color=palette["hypo"],
         label=f"Top {top_n} hypo",
         alpha=0.9,
     )
-    axes[1].set_xlabel("Z-score")
+    axes[1].set_xlabel("Mean methylation difference")
     axes[1].set_ylabel("Mean promoter beta")
     axes[1].set_title("Most extreme discovery signatures")
     axes[1].legend(frameon=True)
@@ -128,7 +129,13 @@ def plot_arm1_validation(data_dir: Path, out_dir: Path, palette: dict) -> None:
     for i, r in dir_rates.iterrows():
         axes[0].text(i, r["rate"] + 1.5, f"{int(r['sum'])}/{int(r['count'])}", ha="center", fontsize=9)
 
-    beta_colors = [palette["oxidative"] if p.startswith("oxidative") else palette["glycolytic"] for p in metabolic["metabolic_program"]]
+    beta_color_map = {
+        "hypermethylated_signature": palette["hyper"],
+        "hypomethylated_signature": palette["hypo"],
+        "oxidative_phosphorylation": palette["oxidative"],
+        "glycolysis": palette["glycolytic"],
+    }
+    beta_colors = [beta_color_map.get(p, palette["other"]) for p in metabolic["metabolic_program"]]
     axes[1].bar(metabolic["metabolic_program"], metabolic["mean_beta"], color=beta_colors, alpha=0.9)
     axes[1].axhline(0.5, linestyle="--", color="#2c3e50", linewidth=1)
     axes[1].set_ylabel("Mean beta")
@@ -155,6 +162,54 @@ def plot_arm1_validation(data_dir: Path, out_dir: Path, palette: dict) -> None:
     fig.suptitle("Arm 1 Validation: GSE197670 Replication", y=1.03)
     fig.tight_layout()
     save_figure(fig, out_dir, "figure2_arm1_validation")
+
+
+def plot_arm1_concordance_venn(data_dir: Path, inputs_dir: Path, out_dir: Path, palette: dict) -> None:
+    hyper = load_tsv(data_dir / "arm1_hypermethylated.tsv")
+    hypo = load_tsv(data_dir / "arm1_hypomethylated.tsv")
+    concordance = load_tsv(data_dir / "arm1_concordance.tsv")
+    validation_meth = pd.read_csv(inputs_dir / "gse197670_methylation.tsv", sep="\t", index_col=0)
+    validation_genes = set(validation_meth.index.astype(str))
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
+
+    specs = [
+        ("hypermethylated", hyper, palette["hyper"], "Hypermethylated signature"),
+        ("hypomethylated", hypo, palette["hypo"], "Hypomethylated signature"),
+    ]
+
+    for ax, (direction, sig_df, color, title) in zip(axes, specs):
+        discovered = set(sig_df["gene_id"].astype(str))
+        tested_df = concordance[concordance["signature_direction"] == direction].copy()
+        tested = set(tested_df["gene_id"].astype(str))
+        concordant = set(tested_df.loc[tested_df["concordant"].astype(bool), "gene_id"].astype(str))
+        not_tested = len(discovered - validation_genes)
+        tested_count = len(tested)
+        concordant_count = len(concordant)
+        discordant_count = tested_count - concordant_count
+
+        ax.set_xlim(0, 10)
+        ax.set_ylim(0, 8)
+        ax.set_aspect("equal")
+        ax.axis("off")
+
+        left = Circle((4.0, 4.0), 2.55, facecolor=color, edgecolor=color, alpha=0.32, linewidth=2)
+        right = Circle((6.0, 4.0), 2.55, facecolor="#95a5a6", edgecolor="#7f8c8d", alpha=0.24, linewidth=2)
+        ax.add_patch(left)
+        ax.add_patch(right)
+
+        ax.text(3.0, 6.85, title, ha="center", va="bottom", fontsize=11, color=color, fontweight="bold")
+        ax.text(7.0, 6.85, "Validation matrix", ha="center", va="bottom", fontsize=11, color="#2c3e50", fontweight="bold")
+
+        ax.text(2.4, 4.1, f"Not tested\n{not_tested}", ha="center", va="center", fontsize=13, color="#2c3e50")
+        ax.text(5.0, 4.55, f"Tested\n{tested_count}", ha="center", va="center", fontsize=13, color="#2c3e50", fontweight="bold")
+        ax.text(5.0, 3.15, f"Concordant\n{concordant_count}", ha="center", va="center", fontsize=12, color="#2c3e50")
+        ax.text(5.0, 1.25, f"Discordant among tested: {discordant_count}", ha="center", va="center", fontsize=10, color="#2c3e50")
+        ax.text(5.0, 0.55, f"Discovery total: {len(discovered)}", ha="center", va="center", fontsize=10, color="#2c3e50")
+
+    fig.suptitle("Arm 1 Concordance Venn-Style Summary", y=0.98)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    save_figure(fig, out_dir, "figure3_arm1_concordance_venn")
 
 
 def plot_arm2_discovery(data_dir: Path, out_dir: Path, palette: dict) -> None:
@@ -343,20 +398,34 @@ def main() -> None:
         help="Directory containing validation output TSV files.",
     )
     parser.add_argument(
+        "--inputs-dir",
+        type=Path,
+        default=Path("results/real_processed/inputs"),
+        help="Directory containing prepared real input matrices.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("results/validation/figures"),
         help="Directory where figures will be written.",
     )
+    parser.add_argument(
+        "--arms",
+        choices=["all", "arm1"],
+        default="all",
+        help="Select whether to render all figures or only Arm 1 figures.",
+    )
 
     args = parser.parse_args()
     palette = configure_style()
 
-    plot_arm1_discovery(args.input_dir, args.output_dir, palette)
+    plot_arm1_discovery(args.input_dir, args.inputs_dir, args.output_dir, palette)
     plot_arm1_validation(args.input_dir, args.output_dir, palette)
-    plot_arm2_discovery(args.input_dir, args.output_dir, palette)
-    plot_arm2_validation(args.input_dir, args.output_dir, palette)
-    plot_step2_pathway_separate(args.input_dir, args.output_dir, palette)
+    plot_arm1_concordance_venn(args.input_dir, args.inputs_dir, args.output_dir, palette)
+    if args.arms == "all":
+        plot_arm2_discovery(args.input_dir, args.output_dir, palette)
+        plot_arm2_validation(args.input_dir, args.output_dir, palette)
+        plot_step2_pathway_separate(args.input_dir, args.output_dir, palette)
 
     print(f"Saved publication-ready figures to: {args.output_dir}")
 

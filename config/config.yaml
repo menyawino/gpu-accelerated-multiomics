@@ -22,8 +22,9 @@ parabricks:
 wgbs:
   bismark_genome_folder: resources/ref/bismark_genome
   bismark_multicore: 8
-  trim_front1: 10
-  trim_front2: 10
+  # WGBS-specific adapter trimming: bisulfite adapters require fixed-head trimming.
+  trim_front1: 8
+  trim_front2: 8
   min_read_len: 30
 
 rnaseq:
@@ -33,11 +34,19 @@ rnaseq:
   star_genome_saindex_nbases: 13
   star_genome_chr_bin_nbits: 14
   star_genome_sasparse_d: 3
+  # RNA-seq does not need fixed-head trimming; adapter trimming by fastp is sufficient.
+  trim_front1: 0
+  trim_front2: 0
+  min_read_len: 20
 
 network:
   correlation_method: spearman
   min_abs_correlation: 0.35
   max_fdr: 0.05
+  # NOTE: GSE123976 has n=9 paired samples (3 NF, 6 HF). Raising min_pairs beyond 9
+  # would leave no edges. Network results are exploratory and should be labelled
+  # as such; independent replication in a larger paired cohort is required before
+  # making causal claims about methylation-expression coupling.
   min_pairs: 6
 
 compute:
@@ -49,6 +58,15 @@ compute:
   python_threads: 4
 
 pairing:
-  # Optional file to override automated pairing.
+  # Required for reproducible analysis; automated pairing is error-prone.
   # Columns: subject_id, rnaseq_run, wgbs_run
   manual_pairs_tsv: config/manual_pairs.tsv
+
+# Curated, literature-derived gene sets (independent of any pipeline outputs).
+# See resources/genesets/README.md for provenance and update policy.
+genesets:
+  oxidative_phosphorylation: resources/genesets/oxidative_phosphorylation.txt
+  glycolysis: resources/genesets/glycolysis.txt
+  fibrosis: resources/genesets/fibrosis.txt
+  inflammation: resources/genesets/inflammation.txt
+  ecm_remodeling: resources/genesets/ecm_remodeling.txt

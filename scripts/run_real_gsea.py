@@ -1,106 +1,141 @@
 #!/usr/bin/env python3
-"""Run real preranked GSEA on the project pathway modules using gseapy.
+"""Run preranked GSEA on external curated pathway gene sets using gseapy.
 
-Because the workspace uses anonymized gene identifiers, this runs true GSEA on
-project-defined named gene sets rather than external symbol-based KEGG/MSigDB sets.
+Gene sets MUST be provided as external, pre-defined files (GMT format or one-per-line
+plain text files organised into categories). Gene sets derived from the same effect table
+being ranked would be circular and are explicitly forbidden here.
 """
 
 import argparse
 from pathlib import Path
+from typing import Dict, List
 
 import gseapy as gp
 import pandas as pd
 
-PATHWAY_LAYOUT = {
-    "Inflammation": [
-        "TNF-alpha / NF-kappaB signaling",
-        "IL6-JAK-STAT3 signaling",
-        "Interferon gamma response",
-        "Interferon alpha response",
-        "Chemokine signaling",
-        "Cytokine-cytokine receptor interaction",
-        "Toll-like receptor signaling",
-        "NLRP3 inflammasome activation",
-    ],
-    "Fibrosis": [
-        "TGF-beta signaling",
-        "Myofibroblast activation",
-        "Collagen biosynthesis and crosslinking",
-        "Connective tissue growth factor axis",
-        "PDGF signaling",
-        "SMAD-dependent profibrotic signaling",
-        "Mesenchymal transition program",
-        "Fibroblast proliferation and activation",
-    ],
-    "ECM Remodeling": [
-        "Extracellular matrix organization",
-        "ECM-receptor interaction",
-        "Integrin signaling",
-        "Focal adhesion remodeling",
-        "Matrix metalloproteinase activity",
-        "Proteoglycan remodeling",
-        "Basement membrane reorganization",
-        "Collagen degradation and turnover",
-    ],
-}
-
-CATEGORY_TO_KEY = {
-    "Inflammation": "inflammation",
-    "Fibrosis": "fibrosis",
-    "ECM Remodeling": "ecm_remodeling",
+# Human-readable display names for known curated gene-set categories.
+CATEGORY_LABELS: Dict[str, str] = {
+    "fibrosis": "Fibrosis",
+    "inflammation": "Inflammation",
+    "ecm_remodeling": "ECM Remodeling",
 }
 
 
-def build_named_gene_sets(pathway_effects: pd.DataFrame) -> dict[str, list[str]]:
-    gene_sets = {}
-    for category, pathway_names in PATHWAY_LAYOUT.items():
-        key = CATEGORY_TO_KEY[category]
-        subset = pathway_effects[pathway_effects["pathway"] == key].copy()
-        subset = subset.sort_values(["fdr", "abs_mean_diff"], ascending=[True, False])
-        genes = subset["gene_id"].tolist()
-        if len(genes) == 0:
-            continue
-        chunk = max(10, len(genes) // len(pathway_names))
-        for i, pathway_name in enumerate(pathway_names):
-            start = i * chunk
-            end = len(genes) if i == len(pathway_names) - 1 else min(len(genes), (i + 1) * chunk)
-            gs = genes[start:end]
-            if len(gs) >= 5:
-                gene_sets[pathway_name] = gs
+def load_gmt(gmt_path: Path) -> Dict[str, List[str]]:
+    """Parse a standard GMT file (name TAB description TAB gene ...) into a dict."""
+    gene_sets: Dict[str, List[str]] = {}
+    with gmt_path.open() as f:
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 3:
+                continue
+            name = parts[0].strip()
+            genes = [g.strip() for g in parts[2:] if g.strip()]
+            if genes:
+                gene_sets[name] = genes
     return gene_sets
 
 
-def write_gmt(gene_sets: dict[str, list[str]], out_path: Path) -> None:
+def load_category_files(
+    fibrosis_path: Path | None,
+    inflammation_path: Path | None,
+    ecm_path: Path | None,
+) -> Dict[str, List[str]]:
+    """Build gene-set dict from per-category plain-text files (one gene per line)."""
+    gene_sets: Dict[str, List[str]] = {}
+    for label, path in [
+        ("Fibrosis", fibrosis_path),
+        ("Inflammation", inflammation_path),
+        ("ECM Remodeling", ecm_path),
+    ]:
+        if path is None or not path.exists():
+            continue
+        genes = [line.strip() for line in path.read_text().splitlines() if line.strip()]
+        if len(genes) >= 5:
+            gene_sets[label] = genes
+    return gene_sets
+
+
+def write_gmt(gene_sets: Dict[str, List[str]], out_path: Path) -> None:
     with out_path.open("w") as f:
         for name, genes in gene_sets.items():
-            f.write("\t".join([name, "project_defined"] + genes) + "\n")
+            f.write("\t".join([name, "curated_external"] + genes) + "\n")
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Run preranked GSEA on pathway modules")
+    ap = argparse.ArgumentParser(
+        description=(
+            "Run preranked GSEA using external, curated gene sets. "
+            "Providing gene sets derived from the same effect table as the ranking "
+            "is circular and not supported."
+        )
+    )
     ap.add_argument(
         "--ranking-table",
         type=Path,
         default=Path("results/validation/reprogramming/all_genes_failing_vs_nonfailing.tsv"),
+        help="TSV with columns gene_id and mean_diff (or combined_effect) used as the ranking metric.",
     )
     ap.add_argument(
-        "--pathway-effects-table",
+        "--gene-sets-gmt",
         type=Path,
-        default=Path("results/validation/reprogramming/pathway_genes_failing_vs_nonfailing.tsv"),
+        default=None,
+        help="External GMT file with curated gene sets (e.g., from MSigDB or manual curation). "
+             "Mutually exclusive with --fibrosis-genes / --inflammation-genes / --ecm-genes.",
     )
+    ap.add_argument(
+        "--fibrosis-genes",
+        type=Path,
+        default=Path("resources/genesets/fibrosis.txt"),
+        help="One gene per line: curated fibrosis gene set.",
+    )
+    ap.add_argument(
+        "--inflammation-genes",
+        type=Path,
+        default=Path("resources/genesets/inflammation.txt"),
+        help="One gene per line: curated inflammation gene set.",
+    )
+    ap.add_argument(
+        "--ecm-genes",
+        type=Path,
+        default=Path("resources/genesets/ecm_remodeling.txt"),
+        help="One gene per line: curated ECM-remodeling gene set.",
+    )
+    ap.add_argument("--rank-col", default="mean_diff",
+                    help="Column to use as ranking metric (default: mean_diff).")
     ap.add_argument("--out-dir", type=Path, default=Path("results/validation/reprogramming/gsea"))
     args = ap.parse_args()
 
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Load ranking table.
     ranking = pd.read_csv(args.ranking_table, sep="\t")
-    ranking = ranking[["gene_id", "mean_diff"]].dropna().sort_values("mean_diff", ascending=False)
+    rank_col = args.rank_col if args.rank_col in ranking.columns else "mean_diff"
+    if "gene_id" not in ranking.columns or rank_col not in ranking.columns:
+        raise ValueError(
+            f"--ranking-table must contain 'gene_id' and '{rank_col}' columns; "
+            f"found: {list(ranking.columns)}"
+        )
+    ranking = ranking[["gene_id", rank_col]].dropna().sort_values(rank_col, ascending=False)
 
-    pathway_effects = pd.read_csv(args.pathway_effects_table, sep="\t")
-    gene_sets = build_named_gene_sets(pathway_effects)
+    # Load external gene sets — never derive from the ranking/effect table.
+    if args.gene_sets_gmt is not None:
+        if not args.gene_sets_gmt.exists():
+            raise FileNotFoundError(f"GMT file not found: {args.gene_sets_gmt}")
+        gene_sets = load_gmt(args.gene_sets_gmt)
+    else:
+        gene_sets = load_category_files(args.fibrosis_genes, args.inflammation_genes, args.ecm_genes)
 
-    gmt_path = out_dir / "project_pathways.gmt"
+    if not gene_sets:
+        raise RuntimeError(
+            "No gene sets loaded. Provide --gene-sets-gmt or at least one of "
+            "--fibrosis-genes / --inflammation-genes / --ecm-genes with ≥5 genes each.\n"
+            "Gene sets must be external and independent of the ranking table — "
+            "using effect-derived sets is circular and scientifically invalid."
+        )
+
+    gmt_path = out_dir / "external_gene_sets.gmt"
     write_gmt(gene_sets, gmt_path)
 
     pre_res = gp.prerank(
@@ -117,9 +152,9 @@ def main() -> None:
     )
 
     res = pre_res.res2d.copy().reset_index()
-    # normalize column names across gseapy versions
+    # Normalise column names across gseapy versions.
     cols = {c.lower(): c for c in res.columns}
-    rename = {}
+    rename: Dict[str, str] = {}
     if "term" in cols:
         rename[cols["term"]] = "pathway_name"
     if "es" in cols:
@@ -134,12 +169,13 @@ def main() -> None:
         rename[cols["lead_genes"]] = "leading_edge_genes"
     res = res.rename(columns=rename)
 
-    category_map = {}
-    for category, names in PATHWAY_LAYOUT.items():
-        for name in names:
-            category_map[name] = category
+    # Attach category label based on the gene-set names that were loaded.
+    known_labels = set(gene_sets.keys())
     if "pathway_name" in res.columns:
-        res["category"] = res["pathway_name"].map(category_map)
+        res["gene_set_source"] = "curated_external"
+        res["gene_set_loaded"] = res["pathway_name"].apply(
+            lambda n: "yes" if n in known_labels else "no"
+        )
     res.to_csv(out_dir / "gsea_results.tsv", sep="\t", index=False)
 
 

@@ -80,6 +80,27 @@ def read_run_list(path: Path) -> set[str]:
     return {line.strip() for line in path.read_text().splitlines() if line.strip()}
 
 
+def resolve_env_cmd(env_name: str, exe_name: str) -> list[str]:
+    if shutil.which("conda"):
+        check = subprocess.run(
+            ["conda", "run", "-n", env_name, exe_name, "--version"],
+            capture_output=True,
+            text=True,
+        )
+        if check.returncode == 0:
+            return ["conda", "run", "-n", env_name, exe_name]
+
+    if shutil.which("mamba"):
+        base = subprocess.run(["mamba", "info", "--base"], capture_output=True, text=True)
+        if base.returncode == 0:
+            prefix = Path(base.stdout.strip()) / "envs" / env_name
+            exe = prefix / "bin" / exe_name
+            if exe.exists():
+                return ["mamba", "run", "-p", str(prefix), exe_name]
+
+    return []
+
+
 def build_targets(project_root: Path, config: dict, complete_runs: list[str]) -> tuple[list[str], list[str]]:
     warnings = []
     outdir = config["resources"]["outdir"]
@@ -141,7 +162,9 @@ def snakemake_cmd(project_root: Path, configfile: Path, cores: int, jobs: int, p
     if shutil.which("snakemake"):
         cmd = ["snakemake"]
     else:
-        cmd = ["conda", "run", "-n", "hf_metab_snakemake", "snakemake"]
+        cmd = resolve_env_cmd("hf_metab_snakemake", "snakemake")
+        if not cmd:
+            raise RuntimeError("Could not locate runnable hf_metab_snakemake environment for snakemake")
 
     cmd.extend(
         [
@@ -150,8 +173,6 @@ def snakemake_cmd(project_root: Path, configfile: Path, cores: int, jobs: int, p
             "--configfile",
             str(configfile),
             "--use-conda",
-            "--conda-frontend",
-            "mamba",
             "--cores",
             str(cores),
             "--jobs",

@@ -74,9 +74,43 @@ fi
 
 bash "$PROJECT_ROOT/setup_tools.sh" "${SETUP_ARGS[@]}"
 
+resolve_env_runner() {
+  local env_name="$1"
+  local exe_name="$2"
+
+  if command -v conda >/dev/null 2>&1; then
+    if conda run -n "$env_name" "$exe_name" --version >/dev/null 2>&1; then
+      echo "conda run -n $env_name $exe_name"
+      return 0
+    fi
+  fi
+
+  if command -v mamba >/dev/null 2>&1; then
+    local mamba_base env_prefix
+    mamba_base="$(mamba info --base 2>/dev/null || true)"
+    if [[ -n "$mamba_base" ]]; then
+      env_prefix="$mamba_base/envs/$env_name"
+      if [[ -x "$env_prefix/bin/$exe_name" ]]; then
+        echo "mamba run -p $env_prefix $exe_name"
+        return 0
+      fi
+    fi
+  fi
+
+  return 1
+}
+
 if [[ $AVAILABLE_ONLY -eq 1 ]]; then
+  PY_RUNNER="$(resolve_env_runner hf_metab python || true)"
+  if [[ -z "$PY_RUNNER" ]]; then
+    echo "Could not locate runnable hf_metab environment for python." >&2
+    exit 1
+  fi
+
+  # shellcheck disable=SC2206
+  PY_RUNNER_ARR=($PY_RUNNER)
   AVAILABLE_CMD=(
-    conda run -n hf_metab python scripts/run_available_samples.py
+    "${PY_RUNNER_ARR[@]}" scripts/run_available_samples.py
     --project-root "$PROJECT_ROOT"
     --configfile "$CONFIGFILE"
     --cores "$SNAKE_CORES"
@@ -100,14 +134,19 @@ fi
 if command -v snakemake >/dev/null 2>&1; then
   SNAKE_CMD=(snakemake)
 else
-  SNAKE_CMD=(conda run -n hf_metab_snakemake snakemake)
+  SNAKE_RUNNER="$(resolve_env_runner hf_metab_snakemake snakemake || true)"
+  if [[ -z "$SNAKE_RUNNER" ]]; then
+    echo "Could not locate runnable hf_metab_snakemake environment for snakemake." >&2
+    exit 1
+  fi
+  # shellcheck disable=SC2206
+  SNAKE_CMD=($SNAKE_RUNNER)
 fi
 
 COMMON_ARGS=(
   --snakefile workflow/Snakefile
   --configfile "$CONFIGFILE"
   --use-conda
-  --conda-frontend mamba
   --cores "$SNAKE_CORES"
   --jobs "$SNAKE_JOBS"
   --printshellcmds

@@ -3,19 +3,26 @@
 Arm 1 Validation: Test methylation signatures in GSE197670
 
 Tests whether:
-1. Same genes show concordant promoter methylation direction
+1. Same genes show concordant promoter methylation direction (HF vs NF)
 2. Pathway-level methylation shifts replicate
 3. Metabolic gene stratification replicates (oxidative hyper, glycolytic hypo)
+
+Platform note: GSE197670 includes both GPL13534 (Illumina 450K) and GPL21145
+(Illumina EPIC 850K) arrays, which differ in CpG coverage.  When the input
+methylation matrix has a leading '__platform__' index row (added by
+prepare_real_processed_geo_inputs.py), this script extracts it and reports
+concordance stratified by platform as well as combined, so cross-platform
+consistency of signatures can be assessed.
 """
 
 import argparse
 import logging
 from pathlib import Path
-from typing import Dict, Set
+from typing import Dict, Optional, Set
 
 import pandas as pd
 import numpy as np
-from scipy.stats import binomtest
+from scipy.stats import binomtest, mannwhitneyu
 from statsmodels.stats.multitest import multipletests
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -29,59 +36,112 @@ def load_signatures(hyper_path: Path, hypo_path: Path) -> tuple:
     return hyper, hypo
 
 
-def test_concordance(hyper_discovery: pd.DataFrame, 
-                     hypo_discovery: pd.DataFrame,
-                     validation_meth: pd.DataFrame) -> pd.DataFrame:
+def _strip_platform_row(meth: pd.DataFrame) -> tuple[pd.DataFrame, Optional[pd.Series]]:
+    """Remove the '__platform__' metadata row if present; return (matrix, platform_series)."""
+    if "__platform__" in meth.index:
+        platform_info = meth.loc["__platform__"].copy()
+        meth = meth.drop(index="__platform__")
+        meth = meth.apply(pd.to_numeric, errors="coerce")
+        return meth, platform_info
+    return meth, None
+
+
+def test_concordance(
+    hyper_discovery: pd.DataFrame,
+    hypo_discovery: pd.DataFrame,
+    validation_meth: pd.DataFrame,
+    platform_info: Optional[pd.Series] = None,
+) -> pd.DataFrame:
     """
-    Test 1: Concordance of methylation direction
-    
-    For each signature gene present in validation, check if direction is preserved.
-    Hypermethylated genes should remain higher, hypomethylated should remain lower.
+    Test 1: Concordance of methylation direction with FDR correction.
+
+    For each signature gene present in the validation cohort, perform a one-sample
+    Wilcoxon signed-rank test vs. 0.5 to determine whether methylation deviates in
+    the expected direction.  The 0.5 threshold is the neutral midpoint for beta
+    values; hypermethylated genes should be > 0.5, hypomethylated < 0.5.
+
+    If *platform_info* is provided (a Series mapping sample IDs to platform IDs),
+    concordance is computed per platform as well as combined.
     """
     results = []
-    
-    # Check hypermethylated concordance
-    for gene in hyper_discovery["gene_id"]:
-        if gene not in validation_meth.index:
-            continue
-        
-        val_beta = validation_meth.loc[gene].values
-        val_mean = np.nanmean(val_beta)
-        
-        result = {
-            "gene_id": gene,
-            "signature_direction": "hypermethylated",
-            "validation_mean_beta": val_mean,
-            "validation_median_beta": np.nanmedian(val_beta),
-            "validation_n_samples": (~pd.isna(val_beta)).sum(),
-            "concordant": val_mean > 0.5  # Simple threshold; hyper genes should stay high
-        }
-        results.append(result)
-    
-    # Check hypomethylated concordance
-    for gene in hypo_discovery["gene_id"]:
-        if gene not in validation_meth.index:
-            continue
-        
-        val_beta = validation_meth.loc[gene].values
-        val_mean = np.nanmean(val_beta)
-        
-        result = {
-            "gene_id": gene,
-            "signature_direction": "hypomethylated",
-            "validation_mean_beta": val_mean,
-            "validation_median_beta": np.nanmedian(val_beta),
-            "validation_n_samples": (~pd.isna(val_beta)).sum(),
-            "concordant": val_mean < 0.5  # Hypo genes should stay low
-        }
-        results.append(result)
-    
+
+    for sig_type, sig_df, expected_above_half in [
+        ("hypermethylated", hyper_discovery, True),
+        ("hypomethylated", hypo_discovery, False),
+    ]:
+        for gene in sig_df["gene_id"]:
+            if gene not in validation_meth.index:
+                continue
+
+            val_beta = validation_meth.loc[gene].values.astype(float)
+            val_beta = val_beta[~np.isnan(val_beta)]
+            if len(val_beta) == 0:
+                continue
+
+            val_mean = float(np.nanmean(val_beta))
+
+            # Wilcoxon signed-rank vs. 0.5 as the neutral methylation reference.
+            from scipy.stats import wilcoxon as _wilcoxon
+            if len(val_beta) >= 2 and not np.all(val_beta == val_beta[0]):
+                alt = "greater" if expected_above_half else "less"
+                try:
+                    _, direction_pval = _wilcoxon(val_beta - 0.5, alternative=alt)
+                except ValueError:
+                    direction_pval = np.nan
+            else:
+                direction_pval = np.nan
+
+            concordant = (val_mean > 0.5) if expected_above_half else (val_mean < 0.5)
+
+            row: dict = {
+                "gene_id": gene,
+                "signature_direction": sig_type,
+                "validation_mean_beta": val_mean,
+                "validation_median_beta": float(np.nanmedian(val_beta)),
+                "validation_n_samples": int((~np.isnan(validation_meth.loc[gene].values)).sum()),
+                "direction_pvalue": direction_pval,
+                "concordant": concordant,
+                "platform": "combined",
+            }
+            results.append(row)
+
+            # Per-platform breakdown when platform metadata is available.
+            if platform_info is not None:
+                for plat in platform_info.unique():
+                    plat_cols = [c for c in validation_meth.columns if platform_info.get(c) == plat]
+                    if not plat_cols:
+                        continue
+                    plat_betas = validation_meth.loc[gene, plat_cols].values.astype(float)
+                    plat_betas = plat_betas[~np.isnan(plat_betas)]
+                    if len(plat_betas) == 0:
+                        continue
+                    plat_mean = float(np.nanmean(plat_betas))
+                    results.append({
+                        **row,
+                        "validation_mean_beta": plat_mean,
+                        "validation_median_beta": float(np.nanmedian(plat_betas)),
+                        "validation_n_samples": len(plat_betas),
+                        "concordant": (plat_mean > 0.5) if expected_above_half else (plat_mean < 0.5),
+                        "platform": str(plat),
+                        "direction_pvalue": np.nan,  # Underpowered at per-platform level; report combined.
+                    })
+
     concordance_df = pd.DataFrame(results)
-    
+
     if len(concordance_df) > 0:
-        concordance_rate = concordance_df["concordant"].sum() / len(concordance_df)
-        logger.info(f"Concordance rate: {concordance_rate:.2%} ({concordance_df['concordant'].sum()}/{len(concordance_df)})")
-    
+        # FDR correct within the combined-platform rows only.
+        combined_mask = concordance_df["platform"] == "combined"
+        combined_pvals = concordance_df.loc[combined_mask, "direction_pvalue"].fillna(1.0).values
+        if len(combined_pvals) > 0:
+            concordance_df.loc[combined_mask, "direction_fdr"] = multipletests(
+                combined_pvals, method="fdr_bh"
+            )[1]
+        concordance_rate = concordance_df.loc[combined_mask, "concordant"].mean()
+        logger.info(
+            f"Combined concordance rate: {concordance_rate:.2%} "
+            f"({concordance_df.loc[combined_mask, 'concordant'].sum()}/{combined_mask.sum()})"
+        )
+
     return concordance_df
 
 
@@ -243,14 +303,20 @@ def main():
     
     logger.info("Loading signatures and validation data...")
     hyper, hypo = load_signatures(args.hyper_signature, args.hypo_signature)
-    validation_meth = pd.read_csv(args.validation_methylation, sep="\t", index_col=0)
-    
+    validation_meth_raw = pd.read_csv(args.validation_methylation, sep="\t", index_col=0)
+
+    # Strip platform metadata row if present (added by prepare_real_processed_geo_inputs.py).
+    validation_meth, platform_info = _strip_platform_row(validation_meth_raw)
+
     logger.info(f"Hyper genes: {len(hyper)}, Hypo genes: {len(hypo)}")
     logger.info(f"Validation matrix: {validation_meth.shape[0]} genes x {validation_meth.shape[1]} samples")
-    
-    # Test 1: Concordance
+    if platform_info is not None:
+        plat_counts = platform_info.value_counts().to_dict()
+        logger.info(f"Platforms in validation data: {plat_counts}")
+
+    # Test 1: Concordance (with FDR correction and per-platform breakdown)
     logger.info("\nTest 1: Testing concordance of methylation direction...")
-    concordance = test_concordance(hyper, hypo, validation_meth)
+    concordance = test_concordance(hyper, hypo, validation_meth, platform_info=platform_info)
     concordance.to_csv(args.out_concordance, sep="\t", index=False)
     logger.info(f"Saved to {args.out_concordance}")
     

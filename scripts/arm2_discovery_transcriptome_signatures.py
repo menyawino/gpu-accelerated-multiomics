@@ -15,61 +15,98 @@ from typing import Dict, Set, Tuple
 
 import pandas as pd
 import numpy as np
-from scipy.stats import zscore, pearsonr
+from scipy.stats import mannwhitneyu
 from statsmodels.stats.multitest import multipletests
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
-def identify_expression_changes(gene_expr_matrix: pd.DataFrame, 
-                                log2fc_threshold: float = 1.0,
+def identify_expression_changes(gene_expr_matrix: pd.DataFrame,
+                                phenotype_dict: Dict[str, str],
+                                hf_phenotypes: Set[str],
+                                nf_phenotype: str = "NF",
+                                fdr_cutoff: float = 0.05,
+                                log2fc_threshold: float = 0.0,
                                 n_samples_min: int = 3) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Identify significantly upregulated and downregulated genes.
+    Identify significantly upregulated and downregulated genes using Mann-Whitney U test.
     
-    Uses mean expression and z-score to define DEGs.
+    Args:
+        gene_expr_matrix: Gene expression matrix (genes x samples)
+        phenotype_dict: Dict mapping sample IDs to phenotype labels
+        hf_phenotypes: Set of phenotype labels for failing heart samples (e.g., {"HF", "DCM", "ICM"})
+        nf_phenotype: Phenotype label for non-failing samples (default: "NF")
+        fdr_cutoff: FDR threshold for significance (default: 0.05)
+        log2fc_threshold: Absolute log2 fold-change threshold (default: 0.0, no filter)
+        n_samples_min: Minimum samples per group (default: 3)
+    
+    Returns:
+        Tuple of (upregulated_df, downregulated_df) with p-values and FDR
     """
+    # Stratify samples by phenotype
+    nf_samples = [s for s in gene_expr_matrix.columns if phenotype_dict.get(s) == nf_phenotype and s in gene_expr_matrix.columns]
+    hf_samples = [s for s in gene_expr_matrix.columns if phenotype_dict.get(s) in hf_phenotypes and s in gene_expr_matrix.columns]
     
-    # Calculate mean expression per gene
-    mean_expr = gene_expr_matrix.mean(axis=1)
+    if len(nf_samples) < n_samples_min or len(hf_samples) < n_samples_min:
+        logger.error(f"Insufficient samples: NF={len(nf_samples)}, HF={len(hf_samples)}")
+        return pd.DataFrame(), pd.DataFrame()
     
-    # Calculate z-scores across genes and keep gene_id indexing
-    z_scores = pd.Series(zscore(mean_expr, nan_policy='omit'), index=mean_expr.index)
-    global_mean = float(mean_expr.mean())
+    logger.info(f"Stratified: {len(nf_samples)} NF samples, {len(hf_samples)} HF samples")
     
-    # Identify up and downregulated
-    upregulated = []
-    downregulated = []
-    
-    for gene_id, idx_row in gene_expr_matrix.iterrows():
-        n_valid = (~idx_row.isna()).sum()
-        if n_valid < n_samples_min:
+    # Test each gene
+    results = []
+    for gene_id in gene_expr_matrix.index:
+        nf_arr = np.asarray(pd.to_numeric(
+            pd.Series(gene_expr_matrix.reindex(index=[gene_id], columns=nf_samples).to_numpy().ravel()),
+            errors="coerce",
+        ), dtype=float)
+        hf_arr = np.asarray(pd.to_numeric(
+            pd.Series(gene_expr_matrix.reindex(index=[gene_id], columns=hf_samples).to_numpy().ravel()),
+            errors="coerce",
+        ), dtype=float)
+        nf_vals = nf_arr[~np.isnan(nf_arr)].astype(float)
+        hf_vals = hf_arr[~np.isnan(hf_arr)].astype(float)
+        
+        if len(nf_vals) < n_samples_min or len(hf_vals) < n_samples_min:
             continue
         
-        if mean_expr[gene_id] >= (global_mean + log2fc_threshold):
-            upregulated.append({
-                "gene_id": gene_id,
-                "mean_expr": mean_expr[gene_id],
-                "z_score": z_scores[gene_id],
-                "n_samples": n_valid,
-                "direction": "upregulated"
-            })
-        elif mean_expr[gene_id] <= (global_mean - log2fc_threshold):
-            downregulated.append({
-                "gene_id": gene_id,
-                "mean_expr": mean_expr[gene_id],
-                "z_score": z_scores[gene_id],
-                "n_samples": n_valid,
-                "direction": "downregulated"
-            })
+        # Mann-Whitney U test
+        stat, pvalue = mannwhitneyu(hf_vals, nf_vals, alternative='two-sided')
+        
+        # Calculate log2FC as median or mean difference
+        hf_mean = np.mean(hf_vals)
+        nf_mean = np.mean(nf_vals)
+        log2fc = np.log2((hf_mean + 1e-6) / (nf_mean + 1e-6))  # Avoid division by zero
+        
+        results.append({
+            "gene_id": gene_id,
+            "hf_mean": hf_mean,
+            "nf_mean": nf_mean,
+            "log2fc": log2fc,
+            "pvalue": pvalue,
+            "n_hf": len(hf_vals),
+            "n_nf": len(nf_vals)
+        })
     
-    up_df = pd.DataFrame(upregulated).sort_values("mean_expr", ascending=False)
-    down_df = pd.DataFrame(downregulated).sort_values("mean_expr", ascending=True)
+    out = pd.DataFrame(results)
+    if out.empty:
+        logger.warning("No genes passed filtering")
+        return pd.DataFrame(), pd.DataFrame()
     
-    logger.info(f"Found {len(up_df)} upregulated and {len(down_df)} downregulated genes")
+    # Apply FDR correction
+    out["fdr"] = multipletests(out["pvalue"].values, method="fdr_bh")[1]
     
-    return up_df, down_df
+    # Filter by FDR and log2FC
+    sig = out[(out["fdr"] <= fdr_cutoff) & (out["log2fc"].abs() >= log2fc_threshold)].copy()
+    
+    # Split into up and down
+    upregulated = sig[sig["log2fc"] > 0].sort_values("log2fc", ascending=False)
+    downregulated = sig[sig["log2fc"] < 0].sort_values("log2fc", ascending=True)
+    
+    logger.info(f"Found {len(upregulated)} upregulated and {len(downregulated)} downregulated genes (FDR < {fdr_cutoff}, |log2FC| > {log2fc_threshold})")
+    
+    return upregulated, downregulated
 
 
 def identify_cooccurrence_signatures(hyper_genes: Set[str],
@@ -157,6 +194,8 @@ def main():
                    help="Gene expression matrix (TPM or normalized)")
     ap.add_argument("--gene-methylation", required=True, type=Path,
                    help="Gene promoter methylation matrix (beta values)")
+    ap.add_argument("--metadata", required=True, type=Path,
+                   help="Sample metadata TSV with phenotype column")
     ap.add_argument("--hyper-signature", required=True, type=Path,
                    help="Hypermethylated genes (from arm1_discovery)")
     ap.add_argument("--hypo-signature", required=True, type=Path,
@@ -165,8 +204,12 @@ def main():
                    help="One gene per line: oxidative phosphorylation genes")
     ap.add_argument("--glycolytic-genes", type=Path,
                    help="One gene per line: glycolysis/stress genes")
-    ap.add_argument("--log2fc-threshold", type=float, default=1.0,
-                   help="Log2 fold-change threshold for DEGs")
+    ap.add_argument("--fdr-cutoff", type=float, default=0.05,
+                   help="FDR cutoff for differential expression (default: 0.05)")
+    ap.add_argument("--log2fc-threshold", type=float, default=0.0,
+                   help="Absolute log2 fold-change threshold for DEGs (default: 0.0)")
+    ap.add_argument("--out-degs", type=Path, default=None,
+                   help="Optional: output all DEG table with p-values and FDR")
     ap.add_argument("--out-hyper-down", required=True, type=Path)
     ap.add_argument("--out-hypo-up", required=True, type=Path)
     ap.add_argument("--out-summary", required=True, type=Path)
@@ -178,6 +221,15 @@ def main():
     gene_expr = pd.read_csv(args.gene_expression, sep="\t", index_col=0)
     gene_meth = pd.read_csv(args.gene_methylation, sep="\t", index_col=0)
     
+    # Load metadata and build phenotype dict
+    meta = pd.read_csv(args.metadata, sep="\t")
+    sample_col = meta.columns[0]
+    pheno_col = "phenotype" if "phenotype" in meta.columns else meta.columns[1]
+    phenotype_dict: Dict[str, str] = {
+        str(sample): str(pheno)
+        for sample, pheno in zip(meta[sample_col].astype(str), meta[pheno_col].astype(str))
+    }
+    
     hyper_sig = pd.read_csv(args.hyper_signature, sep="\t")
     hypo_sig = pd.read_csv(args.hypo_signature, sep="\t")
     
@@ -188,15 +240,27 @@ def main():
     logger.info(f"Methylation: {gene_meth.shape[0]} genes x {gene_meth.shape[1]} samples")
     logger.info(f"Signatures: {len(hyper_genes)} hyper, {len(hypo_genes)} hypo")
     
-    # Identify expression changes
-    logger.info("\nIdentifying expression changes...")
+    # Identify expression changes using statistical testing
+    logger.info("\nIdentifying expression changes via Mann-Whitney U test...")
     up_genes_df, down_genes_df = identify_expression_changes(
         gene_expr,
+        phenotype_dict=phenotype_dict,
+        hf_phenotypes={"HF", "DCM", "ICM"},
+        nf_phenotype="NF",
+        fdr_cutoff=args.fdr_cutoff,
         log2fc_threshold=args.log2fc_threshold
     )
     
-    upregulated = set(up_genes_df["gene_id"])
-    downregulated = set(down_genes_df["gene_id"])
+    # Optional: save all DEG table
+    if args.out_degs:
+        # Combine up and down for comprehensive table
+        all_degs = pd.concat([up_genes_df, down_genes_df], ignore_index=True)
+        all_degs = all_degs.sort_values("fdr")
+        all_degs.to_csv(args.out_degs, sep="\t", index=False)
+        logger.info(f"Saved all DEGs to {args.out_degs}")
+    
+    upregulated = set(up_genes_df["gene_id"]) if not up_genes_df.empty else set()
+    downregulated = set(down_genes_df["gene_id"]) if not down_genes_df.empty else set()
     
     # Identify co-occurrence signatures
     logger.info("\nIdentifying co-occurrence signatures...")
@@ -220,14 +284,15 @@ def main():
         logger.info(f"Loaded {len(glycolytic_genes)} glycolytic genes")
     
     # Classify metabolic programs
-    if len(oxidative_genes) > 0 or len(glycolytic_genes) > 0:
+    if (len(oxidative_genes) > 0 or len(glycolytic_genes) > 0) and not hyper_down_df.empty:
         logger.info("\nClassifying metabolic programs...")
         
         hyper_down_metab = classify_metabolic_programs(
             hyper_down_df["gene_id"], oxidative_genes, glycolytic_genes
         )
         hyper_down_df = hyper_down_df.merge(hyper_down_metab, on="gene_id", how="left")
-        
+
+    if (len(oxidative_genes) > 0 or len(glycolytic_genes) > 0) and not hypo_up_df.empty:
         hypo_up_metab = classify_metabolic_programs(
             hypo_up_df["gene_id"], oxidative_genes, glycolytic_genes
         )

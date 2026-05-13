@@ -135,9 +135,26 @@ def test_gene_direction(signature_genes: List[str],
             "n_control_samples": len(ctrl_vals)
         })
     
-    return pd.DataFrame(results)
+    result_df = pd.DataFrame(results)
 
+    if result_df.empty:
+        return result_df
 
+    # FDR-correct p-values across all genes tested.
+    from statsmodels.stats.multitest import multipletests
+    result_df["fdr"] = multipletests(result_df["pvalue"].values, method="fdr_bh")[1]
+
+    # Significant = FDR < 0.05 AND direction matches discovery.
+    result_df["significant"] = (result_df["fdr"] < 0.05) & result_df["direction_match"]
+
+    sig_rate = result_df["significant"].mean()
+    dir_rate = result_df["direction_match"].mean()
+    logger.info(
+        f"Gene direction test ({expected_direction}): "
+        f"direction_match={dir_rate:.2%}, FDR-significant={sig_rate:.2%} "
+        f"(n={len(result_df)})"
+    )
+    return result_df
 def test_program_stratification(stratified_expr: Dict[str, pd.DataFrame],
                                program_gene_sets: Dict[str, Set[str]]) -> pd.DataFrame:
     """

@@ -10,12 +10,14 @@ Outputs:
 
 import argparse
 from pathlib import Path
-from typing import Dict, Set
+from typing import Dict, Optional, Set
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy.stats import mannwhitneyu, wilcoxon
+from statsmodels.regression.linear_model import OLS
+from statsmodels.tools import add_constant
 from statsmodels.stats.multitest import multipletests
 
 
@@ -38,7 +40,59 @@ def derive_modules_from_all_genes(de_table: pd.DataFrame, module_size: int = 250
     }
 
 
-def compute_global_de(expr: pd.DataFrame, failing_cols: list[str], nf_cols: list[str]) -> pd.DataFrame:
+def compute_global_de(
+    expr: pd.DataFrame,
+    failing_cols: list[str],
+    nf_cols: list[str],
+    covariate_matrix: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """Compute failing-vs-nonfailing differential expression per gene.
+
+    If *covariate_matrix* is provided (rows = samples, columns = numeric
+    covariates such as age or sex indicators), each gene is residualised
+    against those covariates with OLS before the Mann-Whitney test.  This
+    removes confounding by age, sex, or batch without requiring a full
+    mixed-effects model (which would be underpowered at n=9).
+
+    Args:
+        expr: Gene expression matrix (genes × samples).
+        failing_cols: Sample IDs for failing hearts.
+        nf_cols: Sample IDs for non-failing hearts.
+        covariate_matrix: Optional numeric covariate matrix (samples × covariates).
+
+    Returns:
+        DataFrame with per-gene statistics including fdr and abs_mean_diff.
+    """
+    all_cols = failing_cols + nf_cols
+
+    # Residualise expression against covariates if provided.
+    if covariate_matrix is not None and not covariate_matrix.empty:
+        shared = [c for c in all_cols if c in covariate_matrix.index]
+        if len(shared) >= len(covariate_matrix.columns) + 2:
+            cov = covariate_matrix.reindex(shared)
+            X = add_constant(cov.values.astype(float))
+            residuals = {}
+            for gene in expr.index:
+                y = expr.loc[gene, shared].values.astype(float)
+                valid = ~np.isnan(y) & np.all(~np.isnan(X), axis=1)
+                if valid.sum() < X.shape[1] + 2:
+                    residuals[gene] = pd.Series(y, index=shared)
+                    continue
+                fit = OLS(y[valid], X[valid]).fit()
+                res = y.copy()
+                res[valid] = fit.resid
+                residuals[gene] = pd.Series(res, index=shared)
+            expr = pd.DataFrame(residuals).T.reindex(columns=all_cols)
+        else:
+            import warnings
+            warnings.warn(
+                f"Too few samples with covariate data ({len(shared)}) relative to "
+                f"number of covariates ({covariate_matrix.shape[1]}); "
+                "skipping covariate adjustment.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
     rows = []
     for gene, row in expr.iterrows():
         fail_vals = row[failing_cols].dropna().values.astype(float)
@@ -60,6 +114,7 @@ def compute_global_de(expr: pd.DataFrame, failing_cols: list[str], nf_cols: list
                 "pvalue": float(pval),
                 "n_failing": int(len(fail_vals)),
                 "n_nonfailing": int(len(nf_vals)),
+                "covariate_adjusted": covariate_matrix is not None and not covariate_matrix.empty,
             }
         )
 
@@ -218,6 +273,11 @@ def main() -> None:
     ap.add_argument("--metadata", required=True, type=Path)
     ap.add_argument("--control-phenotype", default="NF")
     ap.add_argument("--failing-phenotypes", default="DCM,ICM")
+    ap.add_argument("--covariate-cols", default="age,sex",
+                    help="Comma-separated metadata column names to use as covariates for "
+                         "OLS residualisation before Mann-Whitney testing (default: age,sex). "
+                         "Columns must be numeric or will be label-encoded automatically. "
+                         "Pass an empty string to disable covariate adjustment.")
     ap.add_argument("--fibrosis-genes", type=Path)
     ap.add_argument("--inflammation-genes", type=Path)
     ap.add_argument("--ecm-genes", type=Path)
@@ -241,7 +301,22 @@ def main() -> None:
     if len(nf_cols) < 2 or len(failing_cols) < 2:
         raise ValueError("Insufficient samples in failing or nonfailing groups")
 
-    de = compute_global_de(expr, failing_cols, nf_cols)
+    # Build covariate matrix for residualisation.
+    covariate_matrix: Optional[pd.DataFrame] = None
+    cov_col_names = [c.strip() for c in args.covariate_cols.split(",") if c.strip()]
+    if cov_col_names:
+        available_cov_cols = [c for c in cov_col_names if c in meta.columns]
+        if available_cov_cols:
+            cov_df = meta.set_index(sample_col)[available_cov_cols].copy()
+            # Label-encode non-numeric columns (e.g., sex: M/F -> 0/1).
+            for col in available_cov_cols:
+                if not pd.api.types.is_numeric_dtype(cov_df[col]):
+                    cov_df[col] = pd.Categorical(cov_df[col]).codes.astype(float)
+                    cov_df.loc[cov_df[col] < 0, col] = np.nan
+            cov_df = cov_df.apply(pd.to_numeric, errors="coerce")
+            covariate_matrix = cov_df
+
+    de = compute_global_de(expr, failing_cols, nf_cols, covariate_matrix=covariate_matrix)
 
     fibrosis = load_gene_set(args.fibrosis_genes)
     inflammation = load_gene_set(args.inflammation_genes)
