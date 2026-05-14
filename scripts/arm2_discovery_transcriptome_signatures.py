@@ -240,25 +240,28 @@ def main():
     logger.info(f"Methylation: {gene_meth.shape[0]} genes x {gene_meth.shape[1]} samples")
     logger.info(f"Signatures: {len(hyper_genes)} hyper, {len(hypo_genes)} hypo")
     
-    # Identify expression changes using statistical testing
+    # Identify expression changes using statistical testing.
+    # At n=9 (3 NF, 6 HF), FDR < 0.05 across 31K genes is unattainable.
+    # Save the full ranked table; co-occurrence signatures use direction of effect.
     logger.info("\nIdentifying expression changes via Mann-Whitney U test...")
     up_genes_df, down_genes_df = identify_expression_changes(
         gene_expr,
         phenotype_dict=phenotype_dict,
         hf_phenotypes={"HF", "DCM", "ICM"},
         nf_phenotype="NF",
-        fdr_cutoff=args.fdr_cutoff,
-        log2fc_threshold=args.log2fc_threshold
+        fdr_cutoff=1.0,          # No FDR filter — save full ranked list for downstream use
+        log2fc_threshold=0.0,
     )
-    
-    # Optional: save all DEG table
-    if args.out_degs:
-        # Combine up and down for comprehensive table
+
+    # Save full ranked DE table regardless of significance.
+    if args.out_degs is not None:
         all_degs = pd.concat([up_genes_df, down_genes_df], ignore_index=True)
         all_degs = all_degs.sort_values("fdr")
         all_degs.to_csv(args.out_degs, sep="\t", index=False)
         logger.info(f"Saved all DEGs to {args.out_degs}")
-    
+
+    # For co-occurrence: use direction-consistent genes (any log2FC in expected direction).
+    # At this sample size, direction consistency is the appropriate discovery metric.
     upregulated = set(up_genes_df["gene_id"]) if not up_genes_df.empty else set()
     downregulated = set(down_genes_df["gene_id"]) if not down_genes_df.empty else set()
     

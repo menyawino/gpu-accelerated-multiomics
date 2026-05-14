@@ -67,6 +67,9 @@ def plot_arm1_discovery(data_dir: Path, inputs_dir: Path, out_dir: Path, palette
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
 
+    # Compute per-gene mean beta across HF+NF for violin; actual columns are hf_mean_beta / nf_mean_beta
+    hyper["mean_beta"] = (hyper["hf_mean_beta"] + hyper["nf_mean_beta"]) / 2
+    hypo["mean_beta"] = (hypo["hf_mean_beta"] + hypo["nf_mean_beta"]) / 2
     violin_data = [hyper["mean_beta"].values, hypo["mean_beta"].values, non_sig]
     vp = axes[0].violinplot(violin_data, showmeans=True, showextrema=False, widths=0.8)
     for body, c in zip(vp["bodies"], [palette["hyper"], palette["hypo"], palette["neutral"]]):
@@ -83,7 +86,7 @@ def plot_arm1_discovery(data_dir: Path, inputs_dir: Path, out_dir: Path, palette
     top_hyper = hyper.nlargest(top_n, "mean_beta")
     top_hypo = hypo.nsmallest(top_n, "mean_beta")
     axes[1].scatter(
-        top_hyper["mean_meth_diff"],
+        top_hyper["delta_beta"],
         top_hyper["mean_beta"],
         s=40,
         color=palette["hyper"],
@@ -91,14 +94,14 @@ def plot_arm1_discovery(data_dir: Path, inputs_dir: Path, out_dir: Path, palette
         alpha=0.9,
     )
     axes[1].scatter(
-        top_hypo["mean_meth_diff"],
+        top_hypo["delta_beta"],
         top_hypo["mean_beta"],
         s=40,
         color=palette["hypo"],
         label=f"Top {top_n} hypo",
         alpha=0.9,
     )
-    axes[1].set_xlabel("Mean methylation difference")
+    axes[1].set_xlabel("Delta beta (HF - NF)")
     axes[1].set_ylabel("Mean promoter beta")
     axes[1].set_title("Most extreme discovery signatures")
     axes[1].legend(frameon=True)
@@ -109,8 +112,10 @@ def plot_arm1_discovery(data_dir: Path, inputs_dir: Path, out_dir: Path, palette
 
 
 def plot_arm1_validation(data_dir: Path, out_dir: Path, palette: dict) -> None:
-    concordance = load_tsv(data_dir / "arm1_concordance.tsv")
-    metabolic = load_tsv(data_dir / "arm1_metabolic_stratification.tsv")
+    concordance_all = load_tsv(data_dir / "arm1_validation_concordance.tsv")
+    # Use only combined-platform rows for summary bar charts
+    concordance = concordance_all[concordance_all["platform"] == "combined"].copy()
+    metabolic = load_tsv(data_dir / "arm1_validation_metabolic.tsv")
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
@@ -167,7 +172,8 @@ def plot_arm1_validation(data_dir: Path, out_dir: Path, palette: dict) -> None:
 def plot_arm1_concordance_venn(data_dir: Path, inputs_dir: Path, out_dir: Path, palette: dict) -> None:
     hyper = load_tsv(data_dir / "arm1_hypermethylated.tsv")
     hypo = load_tsv(data_dir / "arm1_hypomethylated.tsv")
-    concordance = load_tsv(data_dir / "arm1_concordance.tsv")
+    concordance_all = load_tsv(data_dir / "arm1_validation_concordance.tsv")
+    concordance = concordance_all[concordance_all["platform"] == "combined"].copy()
     validation_meth = pd.read_csv(inputs_dir / "gse197670_methylation.tsv", sep="\t", index_col=0)
     validation_genes = set(validation_meth.index.astype(str))
 
@@ -248,23 +254,15 @@ def plot_arm2_discovery(data_dir: Path, out_dir: Path, palette: dict) -> None:
     axes[1].set_title("Promoter beta distributions")
     axes[1].legend(frameon=True)
 
-    def composition(df: pd.DataFrame, signature_label: str) -> pd.DataFrame:
-        c = df["metabolic_program"].value_counts().rename_axis("metabolic_program").reset_index(name="count")
-        c["signature"] = signature_label
-        return c
-
-    comp = pd.concat([composition(hyper_down, "Hyper-down"), composition(hypo_up, "Hypo-up")], ignore_index=True)
-    pivot = comp.pivot(index="signature", columns="metabolic_program", values="count").fillna(0)
-
-    bottom = np.zeros(len(pivot))
-    for category, color in [("oxidative_phosphorylation", palette["oxidative"]), ("glycolysis_stress", palette["glycolytic"]), ("other", palette["other"])]:
-        if category in pivot.columns:
-            axes[2].bar(pivot.index, pivot[category].values, bottom=bottom, label=category, color=color)
-            bottom += pivot[category].values
-
+    # Show signature sizes and mean expression per signature
+    sig_labels = ["Hyper-down", "Hypo-up"]
+    sig_counts = [len(hyper_down), len(hypo_up)]
+    sig_colors = [palette["hyper"], palette["hypo"]]
+    bars = axes[2].bar(sig_labels, sig_counts, color=sig_colors, alpha=0.85)
+    for bar, cnt in zip(bars, sig_counts):
+        axes[2].text(bar.get_x() + bar.get_width() / 2, cnt + 0.3, str(cnt), ha="center", va="bottom", fontsize=11)
     axes[2].set_ylabel("Gene count")
-    axes[2].set_title("Metabolic annotation composition")
-    axes[2].legend(frameon=True)
+    axes[2].set_title("Co-occurrence signature sizes")
 
     fig.suptitle("Arm 2 Discovery: Co-occurrence Transcriptome Signatures", y=1.03)
     fig.tight_layout()
@@ -272,9 +270,9 @@ def plot_arm2_discovery(data_dir: Path, out_dir: Path, palette: dict) -> None:
 
 
 def plot_arm2_validation(data_dir: Path, out_dir: Path, palette: dict) -> None:
-    hd_val = load_tsv(data_dir / "arm2_hyper_down_validation.tsv")
-    hu_val = load_tsv(data_dir / "arm2_hypo_up_validation.tsv")
-    programs = load_tsv(data_dir / "arm2_metabolic_programs.tsv")
+    hd_val = load_tsv(data_dir / "arm2_validation_hyper_down.tsv")
+    hu_val = load_tsv(data_dir / "arm2_validation_hypo_up.tsv")
+    programs = load_tsv(data_dir / "arm2_validation_metabolic.tsv")
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 5))
 
@@ -349,7 +347,7 @@ def plot_arm2_validation(data_dir: Path, out_dir: Path, palette: dict) -> None:
 
 def plot_step2_pathway_separate(data_dir: Path, out_dir: Path, palette: dict) -> None:
     """Create separate Step 2 pathway figures for fibrosis, inflammation, and ECM remodeling."""
-    programs = load_tsv(data_dir / "arm2_metabolic_programs.tsv")
+    programs = load_tsv(data_dir / "arm2_validation_metabolic.tsv")
     phenotype_order = ["NF", "DCM", "ICM"]
 
     targets = [

@@ -457,7 +457,7 @@ rule build_multiomic_network:
 rule arm1_discovery_signatures:
     input:
         gene_meth="results/real_processed/inputs/gse123976_methylation.tsv",
-        metadata="results/real_processed/inputs/gse123976_expression_metadata.tsv",
+        metadata="results/real_processed/inputs/gse123976_methylation_metadata.tsv",
         gtf=GTF,
     output:
         hyper="results/real_processed/outputs/arm1_hypermethylated.tsv",

@@ -174,6 +174,75 @@ def prepare_gse123976_methylation(base_dir: Path, out_dir: Path, allow_prefilter
     ).reset_index()
     summary.to_csv(out_dir / "gse123976_methylation_discovery.tsv", sep="\t", index=False)
 
+    # Build WGBS-specific metadata for the methylation matrix columns.
+    # The WGBS series matrix (GPL16791) maps internal IDs via !Sample_description:
+    #   14907X* → NF (non-failing controls)
+    #   14362X* → HF (heart failure)
+    # Also extract age, sex, race from the WGBS characteristics.
+    _build_gse123976_methylation_metadata(
+        base_dir / "GSE123976-GPL16791_series_matrix.txt.gz",
+        sample_cols,
+        out_dir / "gse123976_methylation_metadata.tsv",
+    )
+
+
+def _build_gse123976_methylation_metadata(
+    wgbs_series_matrix: Path,
+    dmc_sample_cols: list[str],
+    out_path: Path,
+) -> None:
+    """Build a metadata TSV for WGBS samples using the WGBS series matrix description mapping.
+
+    The series matrix !Sample_description lines record the internal lab IDs in the same
+    order as !Sample_title ("NF-01", "HF-01", …).  Any DMC table sample not found in that
+    map falls back to prefix-based classification: 14907X* → NF, 14362X* → HF.
+    """
+    meta = parse_geo_series_matrix(wgbs_series_matrix)
+
+    # Extract title → internal ID mapping from the two description lines.
+    titles = [v.strip('"') for v in meta.get("Sample_title", [])]
+    descriptions = meta.get("Sample_description", [])
+    # The second description list contains the internal IDs (the first is "Table S1_DMCsv2.xlsx").
+    id_list = [v.strip('"') for v in descriptions if re.match(r"\d+X\d+", v.strip('"'))]
+    title_to_id = dict(zip(titles, id_list)) if len(id_list) == len(titles) else {}
+    id_to_title = {v: k for k, v in title_to_id.items()}
+
+    characteristics = list(build_characteristics(meta))
+    id_to_chars: dict[str, dict] = {}
+    for i, (title, sample_id) in enumerate(title_to_id.items()):
+        if i < len(characteristics):
+            id_to_chars[sample_id] = characteristics[i]
+
+    rows = []
+    for sample_id in dmc_sample_cols:
+        title = id_to_title.get(sample_id, "")
+        chars = id_to_chars.get(sample_id, {})
+        # Determine phenotype: prefer title-based, fall back to prefix.
+        if "NF" in title or "CON" in str(chars.get("diagnosis", "")):
+            phenotype = "NF"
+        elif "HF" in title or str(chars.get("diagnosis", "")).upper() == "HF":
+            phenotype = "HF"
+        elif sample_id.startswith("14907"):
+            phenotype = "NF"
+        elif sample_id.startswith("14362"):
+            phenotype = "HF"
+        else:
+            phenotype = "unknown"
+
+        rows.append(
+            {
+                "sample_id": sample_id,
+                "phenotype": phenotype,
+                "wgbs_title": title,
+                "diagnosis": chars.get("diagnosis", ""),
+                "age": chars.get("age", ""),
+                "sex": chars.get("Sex", chars.get("sex", "")),
+                "race": chars.get("race", ""),
+            }
+        )
+
+    pd.DataFrame(rows).to_csv(out_path, sep="\t", index=False)
+
 
 def prepare_gse116250(base_dir: Path, out_dir: Path) -> None:
     expr = pd.read_csv(base_dir / "GSE116250_rpkm.txt.gz", sep="\t", compression="gzip")

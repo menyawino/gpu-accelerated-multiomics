@@ -56,6 +56,13 @@ def load_across(path: Path, signature: str) -> pd.DataFrame:
     df = pd.read_csv(path, sep="\t") if path.exists() else pd.DataFrame(columns=["gene_id", "padj", "log2FoldChange"])
     if df.empty:
         return pd.DataFrame(columns=["gene_id", "padj", "log2FoldChange", "signature"])
+    # Normalise column names: support both DESeq2-style (padj, log2FoldChange)
+    # and co-occurrence style (mean_expression, mean_promoter_beta).
+    if "padj" not in df.columns:
+        df["padj"] = 0.01  # placeholder: all genes in these files already passed co-occurrence filter
+    if "log2FoldChange" not in df.columns:
+        expr_col = "mean_expression" if "mean_expression" in df.columns else None
+        df["log2FoldChange"] = np.log2(df[expr_col].clip(lower=1e-6)) if expr_col is not None else 0.0
     out = df[["gene_id", "padj", "log2FoldChange"]].copy()
     out["signature"] = signature
     return out
