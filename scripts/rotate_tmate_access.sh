@@ -3,7 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="$ROOT_DIR/results/anydesk/connect"
+PUBLISH_DIR="$ROOT_DIR/scripts/connect"
 mkdir -p "$OUT_DIR"
+mkdir -p "$PUBLISH_DIR"
 
 wsl() {
   /mnt/c/Windows/System32/wsl.exe -d "$1" --cd /root -- bash -lc "$2"
@@ -48,12 +50,23 @@ cat > "$OUT_DIR/eyad_connect.sh" <<EOF
 exec ssh $EYAD_HOST
 EOF
 
+cat > "$PUBLISH_DIR/eyad_connect.sh" <<EOF
+#!/usr/bin/env bash
+exec ssh $EYAD_HOST
+EOF
+
 cat > "$OUT_DIR/mahmoud_connect.sh" <<EOF
 #!/usr/bin/env bash
 exec ssh $MAHMOUD_HOST
 EOF
 
+cat > "$PUBLISH_DIR/mahmoud_connect.sh" <<EOF
+#!/usr/bin/env bash
+exec ssh $MAHMOUD_HOST
+EOF
+
 chmod +x "$OUT_DIR/eyad_connect.sh" "$OUT_DIR/mahmoud_connect.sh"
+chmod +x "$PUBLISH_DIR/eyad_connect.sh" "$PUBLISH_DIR/mahmoud_connect.sh"
 
 cat > "$OUT_DIR/current_links.txt" <<EOF
 EYAD_RW=$EYAD_RW
@@ -73,10 +86,10 @@ fi
 if [[ -n "$RAW_BASE" ]]; then
   cat > "$OUT_DIR/one_command_connect.txt" <<EOF
 Eyad one-command connect:
-bash <(curl -fsSL $RAW_BASE/results/anydesk/connect/eyad_connect.sh)
+bash <(curl -fsSL $RAW_BASE/scripts/connect/eyad_connect.sh)
 
 Mahmoud one-command connect:
-bash <(curl -fsSL $RAW_BASE/results/anydesk/connect/mahmoud_connect.sh)
+bash <(curl -fsSL $RAW_BASE/scripts/connect/mahmoud_connect.sh)
 EOF
 fi
 
