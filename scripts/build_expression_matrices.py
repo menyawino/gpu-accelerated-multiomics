@@ -6,6 +6,10 @@ from pathlib import Path
 import pandas as pd
 
 
+def normalize_transcript_id(name: str) -> str:
+    return str(name).split("|", 1)[0]
+
+
 def parse_gtf_transcript_to_gene(gtf_path: Path) -> dict:
     mapping = {}
     pat_tid = re.compile(r'transcript_id "([^"]+)"')
@@ -73,7 +77,8 @@ def main():
         iso = q[["Name", "TPM"]].rename(columns={"Name": "isoform_id", "TPM": run})
         iso_frames.append(iso.set_index("isoform_id"))
 
-        q["gene_id"] = q["Name"].map(t2g)
+        q["transcript_id"] = q["Name"].map(normalize_transcript_id)
+        q["gene_id"] = q["transcript_id"].map(t2g)
         g = q.dropna(subset=["gene_id"]).groupby("gene_id", as_index=False)["TPM"].sum()
         gene_frames.append(g.rename(columns={"TPM": run}).set_index("gene_id"))
 
