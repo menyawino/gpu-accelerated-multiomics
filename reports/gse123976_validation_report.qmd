@@ -1,0 +1,11 @@
+---
+title: "Reproduce and validate GSE123976 methylation–expression program"
+format: gfm
+---
+
+This report file is generated/updated by the Snakemake processed-data pipeline (`workflow/processed/Snakefile`).
+Run:
+
+```bash
+./run_processed_analysis.sh --cores 8 --jobs 4
+```
